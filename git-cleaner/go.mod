@@ -2,7 +2,10 @@ module git-cleaner
 
 go 1.21
 
-require github.com/olekukonko/tablewriter v1.1.5
+require (
+	github.com/olekukonko/tablewriter v1.1.5
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

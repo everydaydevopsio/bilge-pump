@@ -7,7 +7,7 @@ REPO_NAME="bilge-pump"
 CASK_NAME="cache-cleaner"
 
 # Available apps
-APPS="dev-cache git-cleaner mac-cache-cleaner"
+APPS="cache-cleaner dev-cache git-cleaner"
 
 usage() {
   cat <<EOF
@@ -22,17 +22,17 @@ Usage:
 
 Options:
   -b <bin_dir>   Install destination directory (REQUIRED)
-  -a <app>       Install specific app only: dev-cache, git-cleaner, or mac-cache-cleaner
-                 (default: install all 3 apps)
+  -a <app>       Install one app: cache-cleaner, dev-cache, git-cleaner, or the platform cleaner
+                 (default: install the unified command and its platform tools)
 
 Arguments:
   <version>      Version tag to install (e.g., v1.2.3). Default: latest release
 
 Examples:
-  # Install all 3 apps (latest) to ~/.local/bin
+  # Install the unified command and its platform tools to ~/.local/bin
   curl -sSfL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/HEAD/install.sh | sh -s -- -b \$HOME/.local/bin
 
-  # Install only mac-cache-cleaner
+  # Install only the platform cleaner
   curl -sSfL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/HEAD/install.sh | sh -s -- -b \$HOME/.local/bin -a mac-cache-cleaner
 
   # Install specific version
@@ -60,18 +60,25 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# Determine OS/ARCH
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$OS" in
+  darwin) PLATFORM_APP=mac-cache-cleaner ;;
+  linux) PLATFORM_APP=linux-cache-cleaner ;;
+  *) error "unsupported operating system: $OS (use the Windows release archive on Windows)" ;;
+esac
+APPS="$APPS $PLATFORM_APP"
+
 # Validate app filter if provided
 if [ -n "$APP_FILTER" ]; then
   case "$APP_FILTER" in
-    dev-cache|git-cleaner|mac-cache-cleaner) : ;;
-    *) error "invalid app: $APP_FILTER (must be one of: dev-cache, git-cleaner, mac-cache-cleaner)" ;;
+    cache-cleaner|dev-cache|git-cleaner) : ;;
+    mac-cache-cleaner) [ "$OS" = "darwin" ] || error "mac-cache-cleaner is only available on macOS" ;;
+    linux-cache-cleaner) [ "$OS" = "linux" ] || error "linux-cache-cleaner is only available on Linux" ;;
+    *) error "invalid app: $APP_FILTER" ;;
   esac
   APPS="$APP_FILTER"
 fi
-
-# Determine OS/ARCH
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-[ "$OS" = "darwin" ] || error "only macOS (darwin) is supported"
 
 UNAME_M="$(uname -m)"
 case "$UNAME_M" in
@@ -134,43 +141,22 @@ case "$VERSION" in
   *) error "version must be a semver tag like v1.2.3" ;;
 esac
 
-# Cleanup function for temp files
-cleanup() {
-  if [ -n "${TMPFILE:-}" ] && [ -f "$TMPFILE" ]; then
-    rm -f "$TMPFILE"
-  fi
-}
-trap cleanup EXIT INT HUP TERM
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT INT HUP TERM
+VERSION_NUMBER="${VERSION#v}"
+ARCHIVE_NAME="cache-cleaner-${VERSION_NUMBER}-${OS}-${ARCH}.tar.gz"
+DOWNLOAD_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/${ARCHIVE_NAME}"
+ARCHIVE_PATH="$TMP_DIR/$ARCHIVE_NAME"
 
-# Install each app
+printf "Downloading %s for %s/%s\n" "$VERSION" "$OS" "$ARCH"
+curl -fL "$DOWNLOAD_URL" -o "$ARCHIVE_PATH" || error "download failed: ${DOWNLOAD_URL}"
+tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR" || error "failed to extract release archive"
+mkdir -p "$BIN_DIR"
+
 for APP_NAME in $APPS; do
-  ASSET_NAME="${APP_NAME}-darwin-${ARCH}"
-  DOWNLOAD_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/${ASSET_NAME}"
-
-  TMPFILE="$(mktemp -t ${APP_NAME}.XXXXXX)"
-
-  printf "Installing %s %s for %s/%s to %s\n" "$APP_NAME" "$VERSION" "$OS" "$ARCH" "$BIN_DIR"
-
-  curl -fL "${DOWNLOAD_URL}" -o "$TMPFILE" || error "download failed: ${DOWNLOAD_URL}"
-
-  chmod 0755 "$TMPFILE"
-  mkdir -p "$BIN_DIR"
-  DEST="$BIN_DIR/${APP_NAME}"
-
-  if mv "$TMPFILE" "$DEST" 2>/dev/null; then
-    # Successfully moved, clear TMPFILE so cleanup doesn't try to remove it
-    TMPFILE=""
-  else
-    # Try install to handle cross-filesystem permissions
-    if install -m 0755 "$TMPFILE" "$DEST" 2>/dev/null; then
-      # Successfully installed, remove temp file since install copies it
-      rm -f "$TMPFILE"
-      TMPFILE=""
-    else
-      error "failed to install to $DEST (try with sudo or set -b)"
-    fi
-  fi
-
+  SOURCE="$TMP_DIR/$APP_NAME"
+  DEST="$BIN_DIR/$APP_NAME"
+  [ -f "$SOURCE" ] || error "release archive does not contain $APP_NAME"
+  install -m 0755 "$SOURCE" "$DEST" || error "failed to install to $DEST (try with sudo or set -b)"
   printf "Installed: %s\n" "$DEST"
-  "$DEST" --version >/dev/null 2>&1 || true
 done

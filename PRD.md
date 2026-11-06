@@ -11,6 +11,29 @@ The cache-cleaner project consists of three cross-platform Go CLI tools designed
 - Transparent size reporting
 - Selective filtering for targeted operations
 - JSON output for automation/CI integration
+- A single `cache-cleaner` executable that runs the full platform-appropriate cleanup or selected cleanup tasks
+- Configuration stored under the XDG Base Directory Specification on Unix-like systems, honoring `XDG_CONFIG_HOME`
+
+## Unified `cache-cleaner` CLI
+
+### Overview
+Ship one unified `cache-cleaner` command for macOS, Linux, and Windows. The release bundles its task executables in the same install directory; users invoke `cache-cleaner` for `scan`, `clean`, and named-tool commands. The command locates bundled tools beside itself, and does not require users to install Go or put each tool on `PATH`.
+
+### Configuration
+- The unified config is stored at `$XDG_CONFIG_HOME/bilge-pump/config.yaml` when `XDG_CONFIG_HOME` is set; otherwise use the platform user config directory (`~/.config/bilge-pump/config.yaml` on Unix and the OS config directory on Windows).
+- `--config` overrides the default path.
+- Existing tool configs remain readable at their XDG-aware per-tool paths, and `git-cleaner` gains config support for its default scan path.
+- A first run works with built-in sensible defaults; `--init` writes a customizable config.
+
+### CLI and behavior
+- `cache-cleaner scan` reports findings across tasks without changing files.
+- `cache-cleaner clean --all` runs platform-appropriate cleanup tasks; `cache-cleaner clean <task>` or `cache-cleaner <task>` selects one task.
+- Individual legacy tools remain available for compatibility.
+- One shared JSON report schema and exit-code convention apply to unified orchestration.
+- Platform builds cover macOS, Linux, and Windows (amd64 and arm64 where supported).
+- Cleanup remains dry-run by default; destructive tasks require explicit `clean` intent and task-level safety controls.
+- Project cache deletion skips paths with tracked files or paths that Git does not mark ignored unless the user supplies the explicit `--unsafe-clean` override.
+- Docker cleanup preserves named volumes by default; Android SDK updates and commands that install software or start services are excluded from cleanup defaults.
 
 ---
 

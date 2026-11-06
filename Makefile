@@ -1,8 +1,8 @@
 # Root Makefile - builds all applications
-.PHONY: all dev-cache git-cleaner mac-cache-cleaner clean test fmt lint vet build release-dry-run release-snapshot goreleaser-check check-tools help
+.PHONY: all dev-cache git-cleaner mac-cache-cleaner cache-cleaner linux-cache-cleaner windows-cache-cleaner clean test fmt lint vet build release-dry-run release-snapshot goreleaser-check check-tools help
 
 # Default target - build all applications
-all: dev-cache git-cleaner mac-cache-cleaner
+all: dev-cache git-cleaner mac-cache-cleaner cache-cleaner linux-cache-cleaner windows-cache-cleaner
 
 # Help target
 help:
@@ -16,6 +16,9 @@ help:
 	@echo "  dev-cache           - Build dev-cache application"
 	@echo "  git-cleaner         - Build git-cleaner application"
 	@echo "  mac-cache-cleaner   - Build mac-cache-cleaner application"
+	@echo "  cache-cleaner       - Build unified cache-cleaner command"
+	@echo "  linux-cache-cleaner - Build Linux cleanup tool"
+	@echo "  windows-cache-cleaner - Build Windows cleanup tool"
 	@echo "  build               - Build all applications"
 	@echo ""
 	@echo "Quality targets:"
@@ -44,6 +47,18 @@ git-cleaner:
 mac-cache-cleaner:
 	@echo "Building mac-cache-cleaner..."
 	@$(MAKE) -C mac-cache-cleaner all
+
+cache-cleaner:
+	@mkdir -p build
+	@go build -o build/cache-cleaner ./cmd/cache-cleaner
+
+linux-cache-cleaner:
+	@mkdir -p build
+	@GOOS=linux GOARCH=amd64 go build -o build/linux-cache-cleaner ./cmd/platform-cache-cleaner
+
+windows-cache-cleaner:
+	@mkdir -p build
+	@GOOS=windows GOARCH=amd64 go build -o build/windows-cache-cleaner.exe ./cmd/platform-cache-cleaner
 
 # Convenience targets that run in all directories
 test:
@@ -75,12 +90,14 @@ build:
 	@$(MAKE) -C dev-cache build
 	@$(MAKE) -C git-cleaner build
 	@$(MAKE) -C mac-cache-cleaner build
+	@$(MAKE) cache-cleaner linux-cache-cleaner windows-cache-cleaner
 
 clean:
 	@echo "Cleaning all applications..."
 	@$(MAKE) -C dev-cache clean
 	@$(MAKE) -C git-cleaner clean
 	@$(MAKE) -C mac-cache-cleaner clean
+	@rm -rf build
 
 # Check required tools are installed
 check-tools:

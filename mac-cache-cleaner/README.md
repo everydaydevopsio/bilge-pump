@@ -53,7 +53,7 @@ make build-darwin  # macOS builds only
 ./build/mac-cache-cleaner --init
 ```
 
-This creates a config file at `~/.config/mac-cache-cleaner/config.yaml`.
+This creates a config file at `$XDG_CONFIG_HOME/mac-cache-cleaner/config.yaml` when `XDG_CONFIG_HOME` is set, or `~/.config/mac-cache-cleaner/config.yaml` otherwise.
 
 2. **Scan for cache usage** (dry-run):
 ```bash
@@ -81,7 +81,7 @@ This creates a config file at `~/.config/mac-cache-cleaner/config.yaml`.
 |------|-------------|
 | `--init` | Write a starter config to `--config` and exit |
 | `--force` | Force overwrite existing config (use with --init) |
-| `--config PATH` | Path to YAML config (default: `~/.config/mac-cache-cleaner/config.yaml`) |
+| `--config PATH` | Path to YAML config (default: XDG-aware config path) |
 | `--targets LIST` | Comma-separated targets to scan/clean (or 'all') |
 | `--clean` | Run safe CLI clean commands (default: dry-run) |
 | `--json` | Output results as JSON |

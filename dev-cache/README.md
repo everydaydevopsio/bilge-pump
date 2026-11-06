@@ -52,7 +52,7 @@ make build-darwin  # macOS builds only
 ./build/dev-cache --init
 ```
 
-This creates a config file at `~/.config/dev-cache/config.yaml`.
+This creates a config file at `$XDG_CONFIG_HOME/dev-cache/config.yaml` when `XDG_CONFIG_HOME` is set, or `~/.config/dev-cache/config.yaml` otherwise (Windows uses the OS user config directory).
 
 2. **Scan for cache directories** (dry-run):
 ```bash
@@ -75,7 +75,7 @@ This creates a config file at `~/.config/dev-cache/config.yaml`.
 |------|-------------|
 | `--init` | Create starter config file and exit |
 | `--force` | Force overwrite existing config (use with --init) |
-| `--config PATH` | Path to YAML config (default: `~/.config/dev-cache/config.yaml`) |
+| `--config PATH` | Path to YAML config (default: XDG-aware dev-cache config path) |
 | `--scan PATH` | Directory to scan (overrides config default) |
 | `--depth N` | Max scan depth (overrides config default, 0 = use config) |
 | `--languages LIST` | Comma-separated list of languages to scan (e.g., `node,python,go`) |

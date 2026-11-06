@@ -45,6 +45,15 @@ make build-darwin  # macOS builds only
 
 ## Quick Start
 
+Create a default config once, then run without `--scan`:
+
+```bash
+git-cleaner --init
+git-cleaner
+```
+
+Config location: `$XDG_CONFIG_HOME/git-cleaner/config.yaml` when set, otherwise `~/.config/git-cleaner/config.yaml` on Unix-like systems and the OS user config directory on Windows. The starter config uses `~/src` when present, otherwise the home directory. `--scan` overrides its configured path.
+
 1. **Scan for repositories** (dry-run):
 ```bash
 ./build/git-cleaner --scan ~/src
@@ -59,7 +68,11 @@ make build-darwin  # macOS builds only
 
 | Flag | Description |
 |------|-------------|
-| `--scan PATH` | Directory to scan for .git directories (required) |
+| `--scan PATH` | Directory to scan for .git directories (overrides config default) |
+| `--config PATH` | Path to YAML config (default: XDG-aware git-cleaner config path) |
+| `--init` | Write a starter config and exit |
+| `--force` | Overwrite config when used with `--init` |
+| `--json` | Output a structured report for scripts |
 | `--clean` | Run `git gc` in each repository and show disk savings |
 
 ## Examples

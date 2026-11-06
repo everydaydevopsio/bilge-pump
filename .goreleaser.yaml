@@ -20,6 +20,8 @@ builds:
       - CGO_ENABLED=0
     goos:
       - darwin
+      - linux
+      - windows
     goarch:
       - amd64
       - arm64
@@ -38,6 +40,8 @@ builds:
       - CGO_ENABLED=0
     goos:
       - darwin
+      - linux
+      - windows
     goarch:
       - amd64
       - arm64
@@ -65,10 +69,54 @@ builds:
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
 
+  - id: cache-cleaner
+    main: ./cmd/cache-cleaner
+    binary: cache-cleaner
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+  - id: linux-cache-cleaner
+    main: ./cmd/platform-cache-cleaner
+    binary: linux-cache-cleaner
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+  - id: windows-cache-cleaner
+    main: ./cmd/platform-cache-cleaner
+    binary: windows-cache-cleaner
+    env:
+      - CGO_ENABLED=0
+    goos: [windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
 archives:
   # Combined tarball for Homebrew
   - id: cache-cleaner
-    name_template: "cache-cleaner-{{ .Version }}-darwin-{{ .Arch }}"
+    name_template: "cache-cleaner-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - none*  # Only include binaries, no extra files
 
@@ -111,6 +159,7 @@ homebrew_casks:
 
     # List all three binaries to install
     binaries:
+      - cache-cleaner
       - dev-cache
       - git-cleaner
       - mac-cache-cleaner
@@ -126,14 +175,16 @@ homebrew_casks:
     # Caveats to display after installation
     caveats: |
       cache-cleaner includes three utilities:
+        • cache-cleaner - Unified scan and cleanup command
         • dev-cache     - Scans for project cache directories
         • git-cleaner   - Finds and optimizes .git directories
-        • mac-cache-cleaner - Runs safe cleanup commands for developer tools
+        • mac-cache-cleaner - macOS cleanup commands
+        • linux-cache-cleaner / windows-cache-cleaner - OS-specific cleanup commands
 
       Quick start:
-        dev-cache --init
-        git-cleaner --scan ~/src
-        mac-cache-cleaner --init
+        cache-cleaner scan
+        cache-cleaner clean --all
+        cache-cleaner --init
 
       Documentation: https://github.com/everydaydevopsio/bilge-pump
 

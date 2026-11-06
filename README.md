@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/github/license/everydaydevopsio/bilge-pump)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/everydaydevopsio/bilge-pump)](https://github.com/everydaydevopsio/bilge-pump/releases)
 
-A collection of Go CLI tools for reclaiming disk space on development machines.
+A cross-platform Go cleanup toolkit with a unified `cache-cleaner` command for macOS, Linux, and Windows.
 
 ## Repository move
 
@@ -39,6 +39,11 @@ brew install --cask cache-cleaner
 
 ## Apps
 
+### cache-cleaner
+Unified entry point for scanning or cleaning project caches, Git repositories, and the current OS's developer caches. Run `cache-cleaner scan` for a dry run, `cache-cleaner clean --all` to run the configured cleanup tasks, or select one task with `cache-cleaner clean dev-cache` / `cache-cleaner clean git-cleaner`.
+
+The release installs the unified command alongside its task executables in one directory. The unified command locates those executables beside itself, so users run one command without adding each tool to `PATH`.
+
 ### mac-cache-cleaner
 macOS cache cleaner that runs **safe, official cleanup commands** for developer tools (Docker, npm, Homebrew, etc.), never `rm -rf`.
 
@@ -47,6 +52,9 @@ Cross-platform tool that scans source directories for project cache directories 
 
 ### git-cleaner
 Cross-platform tool that finds `.git` directories, reports their sizes, and optionally optimizes repositories with `git gc`.
+
+### linux-cache-cleaner and windows-cache-cleaner
+Platform-specific developer cache cleaners for Linux and native Windows. Both support dry-run, `--clean`, `--targets`, `--json`, `--init`, and `--config`.
 
 ## Install
 
@@ -60,17 +68,35 @@ brew install --cask cache-cleaner
 
 Run the trust command before installing or upgrading this third-party cask.
 
-This installs all 3 apps: `dev-cache`, `git-cleaner`, and `mac-cache-cleaner`.
+This installs `cache-cleaner`, `dev-cache`, `git-cleaner`, and the macOS platform cleaner.
+
+### Linux
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/everydaydevopsio/bilge-pump/HEAD/install.sh | sh -s -- -b "$HOME/.local/bin"
+```
+
+### Windows
+
+Download and run [`install.ps1`](install.ps1) from PowerShell:
+
+```powershell
+.\install.ps1
+```
+
+It installs the Windows executables under `%LOCALAPPDATA%\Programs\cache-cleaner`. Add that directory to your user `PATH`.
+
+The release includes the unified command plus the platform tasks in the same directory. Run `cache-cleaner --init` once to create the editable unified config; platform cleaner configs can be initialized with `linux-cache-cleaner --init` or `windows-cache-cleaner --init`.
 
 ### Alternative: Direct Download
 
 If you don't have Homebrew, you can use the install script:
 
 ```bash
-# Install all 3 apps to ~/.local/bin
+# Install the unified command and platform tools to ~/.local/bin
 curl -sSfL https://raw.githubusercontent.com/everydaydevopsio/bilge-pump/HEAD/install.sh | sh -s -- -b $HOME/.local/bin
 
-# Install specific app only
+# Install a specific app only
 curl -sSfL https://raw.githubusercontent.com/everydaydevopsio/bilge-pump/HEAD/install.sh | sh -s -- -b $HOME/.local/bin -a mac-cache-cleaner
 ```
 
@@ -91,6 +117,17 @@ Add this to your shell profile (`~/.zshrc` or `~/.bashrc`) to make it permanent.
 - The script exits early with an error (without partial installs) if required flags or tools are missing.
 
 ## Quick Start
+
+### Unified command
+```bash
+cache-cleaner --init                # create a starter config
+cache-cleaner scan                  # dry-run all configured tasks
+cache-cleaner clean --all           # run all configured cleanup tasks
+cache-cleaner clean dev-cache       # run one cleanup task
+cache-cleaner --json scan           # shared JSON envelope
+```
+
+The unified config lives at `$XDG_CONFIG_HOME/bilge-pump/config.yaml` when `XDG_CONFIG_HOME` is set, otherwise under `~/.config/bilge-pump/` on macOS/Linux or the Windows user config directory. It selects a default scan path and task list. Each task can also be configured with its standalone tool's config file. The platform cleaner YAML exposes target `enabled`, `paths`, and `cmds` entries. `git-cleaner --init` creates its own config and supports `--config` and `--scan` overrides.
 
 ### mac-cache-cleaner
 ```bash
@@ -114,6 +151,8 @@ dev-cache --scan ~/projects --clean  # delete found caches
 git-cleaner --scan ~/src             # find and report .git sizes
 git-cleaner --scan ~/src --clean     # optimize with git gc
 ```
+
+Project-cache deletion skips paths that are not Git-ignored or contain tracked files. `dev-cache --unsafe-clean` explicitly bypasses that check.
 
 ## Troubleshooting
 

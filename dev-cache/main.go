@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -26,15 +27,16 @@ var (
 
 // ----- CLI flags -----
 var (
-	flagClean  = flag.Bool("clean", false, "Delete found cache directories")
-	flagYes    = flag.Bool("yes", false, "Skip confirmation prompt for cleanup")
-	flagJSON   = flag.Bool("json", false, "Output results as JSON")
-	flagConfig = flag.String("config", defaultConfigPath(), "Path to YAML config")
-	flagInit   = flag.Bool("init", false, "Write a starter config to --config and exit")
-	flagForce  = flag.Bool("force", false, "Force overwrite existing config (use with --init)")
-	flagScan   = flag.String("scan", "", "Directory to scan (overrides config default)")
-	flagDepth  = flag.Int("depth", 0, "Max scan depth (0 = use config default, overrides config)")
-	flagLangs  = flag.String("languages", "", "Comma-separated list of languages to scan")
+	flagClean       = flag.Bool("clean", false, "Delete found cache directories")
+	flagYes         = flag.Bool("yes", false, "Skip confirmation prompt for cleanup")
+	flagJSON        = flag.Bool("json", false, "Output results as JSON")
+	flagConfig      = flag.String("config", defaultConfigPath(), "Path to YAML config")
+	flagInit        = flag.Bool("init", false, "Write a starter config to --config and exit")
+	flagForce       = flag.Bool("force", false, "Force overwrite existing config (use with --init)")
+	flagScan        = flag.String("scan", "", "Directory to scan (overrides config default)")
+	flagDepth       = flag.Int("depth", 0, "Max scan depth (0 = use config default, overrides config)")
+	flagLangs       = flag.String("languages", "", "Comma-separated list of languages to scan")
+	flagUnsafeClean = flag.Bool("unsafe-clean", false, "Allow deleting cache paths that are not ignored by Git (unsafe)")
 )
 
 // ----- Config types -----
@@ -77,6 +79,7 @@ type Report struct {
 	OS       string    `json:"os"`
 	Arch     string    `json:"arch"`
 	DryRun   bool      `json:"dry_run"`
+	Version  string    `json:"version"`
 	When     time.Time `json:"when"`
 	ScanPath string    `json:"scan_path"`
 	MaxDepth int       `json:"max_depth"`
@@ -88,6 +91,14 @@ type Report struct {
 // ----- Utilities -----
 
 func defaultConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) && runtime.GOOS != "windows" {
+		return filepath.Join(xdg, "dev-cache", "config.yaml")
+	}
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+			return filepath.Join(dir, "dev-cache", "config.yaml")
+		}
+	}
 	h, _ := os.UserHomeDir()
 	if h == "" {
 		return "./config.yaml"
@@ -328,6 +339,7 @@ func main() {
 		OS:       runtime.GOOS,
 		Arch:     runtime.GOARCH,
 		DryRun:   !*flagClean,
+		Version:  version,
 		When:     time.Now(),
 		ScanPath: scanPath,
 		MaxDepth: maxDepth,
@@ -339,9 +351,13 @@ func main() {
 	}
 
 	// Scan for cache directories
-	fmt.Printf("Scanning %s (max depth: %d)...\n", scanPath, maxDepth)
+	progress := os.Stdout
+	if *flagJSON {
+		progress = os.Stderr
+	}
+	_, _ = fmt.Fprintf(progress, "Scanning %s (max depth: %d)...\n", scanPath, maxDepth)
 	if cfg.Options.DetectLanguage {
-		fmt.Printf("Language detection enabled - scanning with language-specific patterns\n")
+		_, _ = fmt.Fprintln(progress, "Language detection enabled - scanning with language-specific patterns")
 	}
 	findings := scanDirectory(scanPath, maxDepth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns)
 	rep.Findings = findings
@@ -375,6 +391,7 @@ func main() {
 	// Display results
 	displayDetailed(findings, total)
 
+	partialFailure := false
 	// Cleanup if requested
 	if *flagClean {
 		cacheFindings, cacheTotal := filterCacheFindings(findings)
@@ -393,6 +410,13 @@ func main() {
 				return sortedFindings[i].SizeBytes > sortedFindings[j].SizeBytes
 			})
 			for _, f := range sortedFindings {
+				if !*flagUnsafeClean {
+					allowed, reason := safeCachePath(f)
+					if !allowed {
+						fmt.Printf("  - SKIP %s (%s)\n", f.Path, reason)
+						continue
+					}
+				}
 				fmt.Printf("  - %s (%s)\n", f.Path, human(f.SizeBytes))
 			}
 			fmt.Printf("\nContinue? [y/N]: ")
@@ -415,6 +439,13 @@ func main() {
 		var errors []string
 
 		for _, f := range cacheFindings {
+			if !*flagUnsafeClean {
+				allowed, reason := safeCachePath(f)
+				if !allowed {
+					errors = append(errors, fmt.Sprintf("skipped %s: %s", f.Path, reason))
+					continue
+				}
+			}
 			if err := os.RemoveAll(f.Path); err != nil {
 				errors = append(errors, fmt.Sprintf("%s: %v", f.Path, err))
 				continue
@@ -434,6 +465,7 @@ func main() {
 		fmt.Println()
 
 		if len(errors) > 0 {
+			partialFailure = true
 			fmt.Println("\nErrors:")
 			for _, e := range errors {
 				fmt.Printf("  - %s\n", e)
@@ -447,6 +479,37 @@ func main() {
 			fmt.Println(" -", w)
 		}
 	}
+	if partialFailure {
+		os.Exit(3)
+	}
+}
+
+func safeCachePath(f Finding) (bool, string) {
+	root := f.ProjectRoot
+	if root == "" {
+		return false, "project root is unknown; pass --unsafe-clean to override"
+	}
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, "not inside a Git repository; pass --unsafe-clean to override"
+	}
+	root = strings.TrimSpace(string(out))
+	rel, err := filepath.Rel(root, f.Path)
+	if err != nil {
+		return false, "cache path is outside its Git repository"
+	}
+	tracked := exec.Command("git", "-C", root, "ls-files", "--", rel)
+	if out, err := tracked.Output(); err != nil {
+		return false, "could not check Git tracking status"
+	} else if len(out) > 0 {
+		return false, "contains Git-tracked files; pass --unsafe-clean to override"
+	}
+	ignored := exec.Command("git", "-C", root, "check-ignore", "-q", "--no-index", "--", rel)
+	if err := ignored.Run(); err != nil {
+		return false, "not ignored by Git; pass --unsafe-clean to override"
+	}
+	return true, ""
 }
 
 // filterCacheFindings returns only findings representing cache directories and the total bytes they consume.

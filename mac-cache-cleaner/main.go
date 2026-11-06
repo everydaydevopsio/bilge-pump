@@ -115,6 +115,7 @@ type Report struct {
 	OS       string                 `json:"os"`
 	Arch     string                 `json:"arch"`
 	DryRun   bool                   `json:"dry_run"`
+	Version  string                 `json:"version"`
 	When     time.Time              `json:"when"`
 	Totals   map[string]uint64      `json:"totals_by_target_bytes"`
 	Findings map[string][]Finding   `json:"findings"`
@@ -125,6 +126,14 @@ type Report struct {
 // ----- Utilities -----
 
 func defaultConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) && runtime.GOOS != "windows" {
+		return filepath.Join(xdg, "mac-cache-cleaner", "config.yaml")
+	}
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+			return filepath.Join(dir, "mac-cache-cleaner", "config.yaml")
+		}
+	}
 	h, _ := os.UserHomeDir()
 	if h == "" {
 		return "./config.yaml"
@@ -472,13 +481,13 @@ func writeStarterConfig(path string, force bool) error {
 		Version: 1,
 		Options: Options{DockerPruneByDefault: false},
 		Targets: []Target{
-			{Name: "docker", Enabled: true, Notes: "Docker caches and images (safe CLI prune only)", Paths: []string{"~/Library/Caches/docker", "~/Library/Caches/buildx", "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"}, Cmds: [][]string{{"docker", "builder", "prune", "-af"}, {"docker", "system", "prune", "-af", "--volumes"}}, Tools: []Tool{{Name: "docker", InstallCmd: "brew install --cask docker"}}},
+			{Name: "docker", Enabled: true, Notes: "Docker caches and images; named volumes are preserved", Paths: []string{"~/Library/Caches/docker", "~/Library/Caches/buildx", "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"}, Cmds: [][]string{{"docker", "builder", "prune", "-af"}, {"docker", "system", "prune", "-af"}}, Tools: []Tool{{Name: "docker", InstallCmd: "brew install --cask docker"}}},
 			{Name: "brew", Enabled: true, Notes: "Homebrew cleanup (removes old packages and caches)", Paths: []string{"~/Library/Caches/Homebrew", "$(brew --cache)"}, Cmds: [][]string{{"brew", "cleanup", "-s"}, {"brew", "autoremove"}}, Tools: []Tool{{Name: "brew", InstallCmd: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""}}},
 			{Name: "npm", Enabled: true, Notes: "npm cache", Paths: []string{"~/.npm"}, Cmds: [][]string{{"npm", "cache", "clean", "--force"}}, Tools: []Tool{{Name: "npm", InstallCmd: "brew install node"}}},
 			{Name: "yarn", Enabled: true, Notes: "Global Yarn cache", Paths: []string{"~/Library/Caches/Yarn", "~/.yarn/cache"}, Cmds: [][]string{{"yarn", "cache", "clean"}}, Tools: []Tool{{Name: "yarn", InstallCmd: "brew install yarn"}}},
 			{Name: "pnpm", Enabled: true, Notes: "pnpm store and cache", Paths: []string{"~/.pnpm-store", "~/Library/Caches/pnpm"}, Cmds: [][]string{{"pnpm", "store", "prune"}}, Tools: []Tool{{Name: "pnpm", InstallCmd: "brew install pnpm"}}},
 			{Name: "node-versions", Enabled: true, Notes: "Node version manager (nvm)", Paths: []string{"~/.nvm/.cache"}, Cmds: [][]string{{"nvm", "cache", "clear"}}, Tools: []Tool{{Name: "nvm", InstallCmd: "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash", InstallNotes: "After installation, restart your terminal or run: source ~/.bashrc or source ~/.zshrc", CheckPath: "~/.nvm/nvm.sh"}}},
-			{Name: "expo", Enabled: true, Notes: "Expo and React Native caches", Paths: []string{"~/.expo", "~/.cache/expo"}, Cmds: [][]string{{"expo", "start", "-c"}}, Tools: []Tool{{Name: "expo", InstallCmd: "npm install -g expo-cli"}}},
+			{Name: "expo", Enabled: true, Notes: "Expo and React Native cache size (informational; expo start -c launches a server)", Paths: []string{"~/.expo", "~/.cache/expo"}, Cmds: [][]string{}, Tools: []Tool{{Name: "expo", InstallCmd: "npm install -g expo-cli"}}},
 			{Name: "go", Enabled: true, Notes: "Go build & module caches", Paths: []string{"~/Library/Caches/go-build", "$GOMODCACHE/cache", "$GOPATH/pkg/mod/cache"}, Cmds: [][]string{{"go", "clean", "-cache", "-testcache", "-modcache"}}, Tools: []Tool{{Name: "go", InstallCmd: "brew install go"}}},
 			{Name: "rust", Enabled: true, Notes: "Rust registry and build caches (requires cargo-cache: cargo install cargo-cache)", Paths: []string{"~/.cargo/registry", "~/.cargo/git"}, Cmds: [][]string{{"cargo", "cache", "-a"}}, Tools: []Tool{{Name: "cargo", InstallCmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"}, {Name: "cargo-cache", InstallCmd: "cargo install cargo-cache", InstallNotes: "Install this after cargo is installed"}}},
 			{Name: "python", Enabled: true, Notes: "pip and pipenv caches", Paths: []string{"~/.cache/pip", "~/Library/Caches/pip", "~/.local/share/virtualenvs"}, Cmds: [][]string{{"pip", "cache", "purge"}}, Tools: []Tool{{Name: "pip", InstallCmd: "brew install python", InstallNotes: "pip is included with Python installation"}}},
@@ -501,7 +510,7 @@ func writeStarterConfig(path string, force bool) error {
 			{Name: "android-studio", Enabled: true, Notes: "Android Studio IDE caches, logs, and indexes", Paths: []string{"~/Library/Caches/Google/AndroidStudio*", "~/Library/Logs/Google/AndroidStudio*", "~/Library/Application Support/Google/AndroidStudio*/system/caches", "~/Library/Application Support/Google/AndroidStudio*/system/index"}, Cmds: [][]string{}},
 			{Name: "terraform", Enabled: true, Notes: "Terraform plugin cache", Paths: []string{"~/.terraform.d/plugin-cache/"}, Cmds: [][]string{}, Tools: []Tool{{Name: "terraform", InstallCmd: "brew install terraform"}}},
 			{Name: "packer", Enabled: true, Notes: "Packer plugins directory", Paths: []string{"~/.packer.d/plugins"}, Cmds: [][]string{}, Tools: []Tool{{Name: "packer", InstallCmd: "brew install packer"}}},
-			{Name: "ollama", Enabled: true, Notes: "Ollama models and cache (uses official prune)", Paths: []string{"~/.ollama/models"}, Cmds: [][]string{{"ollama", "list"}}, Tools: []Tool{{Name: "ollama", InstallCmd: "brew install ollama"}}},
+			{Name: "ollama", Enabled: true, Notes: "Ollama models and cache (informational; models are not removed)", Paths: []string{"~/.ollama/models"}, Cmds: [][]string{}, Tools: []Tool{{Name: "ollama", InstallCmd: "brew install ollama"}}},
 			{Name: "home-cache", Enabled: true, Notes: "Top-level ~/.cache subdirectories (informational only)", Paths: []string{"~/.cache/*"}, Cmds: [][]string{}, Tools: []Tool{}},
 			{Name: "pyenv", Enabled: true, Notes: "Pyenv installed versions and downloads (informational)", Paths: []string{"~/.pyenv/versions", "~/.pyenv/cache", "~/.pyenv/plugins/python-build/share/python-build/cache"}, Cmds: [][]string{}, Tools: []Tool{{Name: "pyenv", InstallCmd: "brew install pyenv", InstallNotes: "Remove unused versions with: pyenv uninstall <version>"}}},
 			{Name: "rustup", Enabled: true, Notes: "Rustup toolchains and targets (informational)", Paths: []string{"~/.rustup/toolchains", "~/.rustup/tmp", "~/.rustup/downloads"}, Cmds: [][]string{}, Tools: []Tool{{Name: "rustup", InstallCmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh", InstallNotes: "List toolchains: rustup toolchain list; remove: rustup toolchain uninstall <name>"}}},
@@ -509,7 +518,7 @@ func writeStarterConfig(path string, force bool) error {
 			{Name: "rvm", Enabled: true, Notes: "RVM installed rubies and archives (informational)", Paths: []string{"~/.rvm/rubies", "~/.rvm/archives", "~/.rvm/src"}, Cmds: [][]string{{"rvm", "cleanup", "all"}}, Tools: []Tool{{Name: "rvm", InstallCmd: "curl -sSL https://get.rvm.io | bash", InstallNotes: "List rubies: rvm list; remove: rvm remove <ruby>"}}},
 			{Name: "dropbox", Enabled: true, Notes: "Dropbox metadata and state (informational only; no safe CLI clean)", Paths: []string{"~/.dropbox"}, Cmds: [][]string{}, Tools: []Tool{}},
 			{Name: "cursor", Enabled: true, Notes: "Cursor editor state and cache (informational)", Paths: []string{"~/.cursor"}, Cmds: [][]string{}, Tools: []Tool{}},
-			{Name: "puppeteer", Enabled: true, Notes: "Puppeteer cache", Paths: []string{"~/.cache/puppeteer"}, Cmds: [][]string{{"sh", "-c", "npm list -g puppeteer >/dev/null 2>&1 || npm install -g puppeteer; NODE_PATH=$(npm root -g) node -e \"const puppeteer = require('puppeteer'); puppeteer.default.trimCache().then(() => process.exit(0)).catch((e) => {console.error(e); process.exit(1);})\""}}, Tools: []Tool{{Name: "node", InstallCmd: "brew install node"}}},
+			{Name: "puppeteer", Enabled: true, Notes: "Puppeteer cache (informational; cleanup must not install packages)", Paths: []string{"~/.cache/puppeteer"}, Cmds: [][]string{}, Tools: []Tool{{Name: "node", InstallCmd: "brew install node"}}},
 		},
 	}
 	if err := ensureDir(path); err != nil {
@@ -531,7 +540,36 @@ func loadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
+	// sdkmanager --update downloads data rather than reclaiming space.
+	for i := range cfg.Targets {
+		filtered := cfg.Targets[i].Cmds[:0]
+		for _, cmd := range cfg.Targets[i].Cmds {
+			if cfg.Targets[i].Name == "android" && len(cmd) == 2 && cmd[0] == "sdkmanager" && cmd[1] == "--update" {
+				continue
+			}
+			if cfg.Targets[i].Name == "expo" && len(cmd) >= 3 && cmd[0] == "expo" && cmd[1] == "start" && cmd[2] == "-c" {
+				continue
+			}
+			if cfg.Targets[i].Name == "puppeteer" && len(cmd) >= 2 && cmd[0] == "sh" && cmd[1] == "-c" {
+				continue
+			}
+			if cfg.Targets[i].Name == "docker" && !cfg.Options.DockerPruneByDefault && !*flagDockerPrune && containsArg(cmd, "--volumes") {
+				continue
+			}
+			filtered = append(filtered, cmd)
+		}
+		cfg.Targets[i].Cmds = filtered
+	}
 	return &cfg, nil
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ----- Tool checking -----
@@ -924,7 +962,7 @@ func run() int {
 		return 0
 	}
 
-	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, When: time.Now(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
+	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, Version: version, When: time.Now(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
 	if h, _ := os.Hostname(); h != "" {
 		rep.Hostname = h
 	}
@@ -1077,10 +1115,15 @@ func run() int {
 	}
 
 	// Now run commands if --clean is specified
+	partialFailure := false
 	if *flagClean {
 		for _, t := range targets {
 			for _, c := range t.Cmds {
-				runCmd(c)
+				result := runCmd(c)
+				if result.Error != "" {
+					rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s: %s", strings.Join(c, " "), result.Error))
+					partialFailure = true
+				}
 			}
 		}
 
@@ -1201,6 +1244,9 @@ func run() int {
 		for _, w := range rep.Warnings {
 			fmt.Println(" -", w)
 		}
+	}
+	if *flagClean && partialFailure {
+		return 3
 	}
 	return 0
 }
