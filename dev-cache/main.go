@@ -189,21 +189,21 @@ func expandAndCleanPatterns(patterns []string) []string {
 }
 
 func compilePathPattern(pattern string) (compiledPathPattern, bool) {
-	pattern = filepath.Clean(expand(strings.TrimSpace(pattern)))
+	pattern = filepath.Clean(strings.TrimSpace(pattern))
 	if pattern == "" {
 		return compiledPathPattern{}, false
 	}
 	parts := splitPathParts(pattern)
 	globIndex := -1
 	for i, part := range parts {
-		if strings.ContainsAny(part, "*?[") {
+		if strings.ContainsAny(part, "*?[") || (runtime.GOOS != "windows" && strings.Contains(part, "\\")) {
 			globIndex = i
 			break
 		}
 	}
 	if globIndex < 0 {
 		literalPath := pattern
-		if !isAbsolutePath(literalPath) {
+		if !isAbsolutePath(literalPath) && filepath.VolumeName(literalPath) == "" {
 			literalPath = filepath.Join(currentWorkingDirectory(), literalPath)
 		}
 		return compiledPathPattern{literalPath: absolutePath(literalPath), literalOnly: true}, true
@@ -217,11 +217,13 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 		if volume != "" {
 			literalBase = volume + string(filepath.Separator)
 		}
+	} else if volume != "" {
+		literalBase = volume
 	}
 	for _, part := range parts[:globIndex] {
 		literalBase = filepath.Join(literalBase, part)
 	}
-	if !isAbsolute {
+	if !isAbsolute && volume == "" {
 		literalBase = filepath.Join(currentWorkingDirectory(), literalBase)
 	}
 	literalBase = absolutePath(literalBase)
@@ -250,6 +252,9 @@ func currentWorkingDirectory() string {
 }
 
 func isAbsolutePath(path string) bool {
+	if runtime.GOOS == "windows" && len(path) > 0 && (path[0] == '\\' || path[0] == '/') {
+		return true
+	}
 	if filepath.IsAbs(path) {
 		return true
 	}
@@ -260,7 +265,7 @@ func isAbsolutePath(path string) bool {
 }
 
 func absolutePath(path string) string {
-	if isAbsolutePath(path) {
+	if isAbsolutePath(path) && (runtime.GOOS != "windows" || filepath.VolumeName(path) != "") {
 		return filepath.Clean(path)
 	}
 	if absolute, err := filepath.Abs(path); err == nil {
@@ -284,9 +289,53 @@ func validatePathPatterns(patterns []string) error {
 		if pattern == "" {
 			continue
 		}
-		pattern = filepath.Clean(expand(pattern))
-		if _, err := filepath.Match(pattern, ""); err != nil {
+		pattern = filepath.Clean(pattern)
+		for _, component := range splitPathParts(pattern) {
+			if err := validateGlobComponent(component); err != nil {
+				return fmt.Errorf("invalid path pattern %q: %w", pattern, err)
+			}
+		}
+		if _, err := filepath.Match(pattern, strings.Repeat("x", len(pattern)+1)); err != nil {
 			return fmt.Errorf("invalid path pattern %q: %w", pattern, err)
+		}
+	}
+	return nil
+}
+
+func validateGlobComponent(pattern string) error {
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			if runtime.GOOS == "windows" {
+				continue
+			}
+			i++
+			if i >= len(pattern) {
+				return fmt.Errorf("trailing escape")
+			}
+		case '[':
+			start := i + 1
+			if start < len(pattern) && (pattern[start] == '!' || pattern[start] == '^') {
+				start++
+			}
+			if start < len(pattern) && pattern[start] == ']' {
+				start++
+			}
+			closed := false
+			for j := start; j < len(pattern); j++ {
+				if pattern[j] == '\\' && runtime.GOOS != "windows" {
+					j++
+					continue
+				}
+				if pattern[j] == ']' {
+					closed = true
+					i = j
+					break
+				}
+			}
+			if !closed {
+				return fmt.Errorf("unterminated character class")
+			}
 		}
 	}
 	return nil
@@ -664,6 +713,8 @@ func main() {
 		"min-age":      *flagMinAge,
 		"max-age":      *flagMaxAge,
 	}, explicitFlags)
+	filterOptions.ExcludePaths = expandAndCleanPatterns(filterOptions.ExcludePaths)
+	filterOptions.IncludeOnly = expandAndCleanPatterns(filterOptions.IncludeOnly)
 	for _, patterns := range [][]string{filterOptions.ExcludePaths, filterOptions.IncludeOnly} {
 		if err := validatePathPatterns(patterns); err != nil {
 			fmt.Println("invalid path filter:", err)
@@ -698,8 +749,8 @@ func main() {
 	}
 
 	filters := ScanFilters{
-		ExcludePaths: expandAndCleanPatterns(filterOptions.ExcludePaths),
-		IncludeOnly:  expandAndCleanPatterns(filterOptions.IncludeOnly),
+		ExcludePaths: filterOptions.ExcludePaths,
+		IncludeOnly:  filterOptions.IncludeOnly,
 		MinAge:       minAge,
 		MaxAge:       maxAge,
 		Now:          time.Now(),

@@ -858,6 +858,54 @@ func TestValidatePathPatterns(t *testing.T) {
 	if err := validatePathPatterns([]string{"./src/project["}); err == nil {
 		t.Fatal("malformed exclusion glob was accepted")
 	}
+	for _, pattern := range []string{"./src/*/project[", "./src/team-["} {
+		if err := validatePathPatterns([]string{pattern}); err == nil {
+			t.Errorf("malformed exclusion glob %q was accepted", pattern)
+		}
+	}
+}
+
+func TestCompilePathPatternDoesNotExpandEnvironmentValuesTwice(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "tree$tag")
+	t.Setenv("CACHE_ROOT", root)
+	t.Setenv("tag", "")
+	want := filepath.Join(root, "project")
+	normalized := expandAndCleanPatterns([]string{"$CACHE_ROOT/project"})
+	compiled, ok := compilePathPattern(normalized[0])
+	if !ok || compiled.literalPath != want {
+		t.Fatalf("compiled filter = %+v, want literal path %q", compiled, want)
+	}
+}
+
+func TestEscapedUnixPathComponentsMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix filepath.Match escape semantics")
+	}
+	root := t.TempDir()
+	cache := filepath.Join(root, "team blue", "project", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patterns := []string{"node_modules"}
+	langs := map[string]string{"node_modules": "node"}
+	include := filepath.Join(root, "team\\ blue", "*")
+	findings := scanDirectory(root, 4, patterns, langs, false, nil, nil, nil, ScanFilters{IncludeOnly: []string{include}})
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("escaped include prefix findings = %+v, want %s", findings, cache)
+	}
+
+	escapedLiteral := filepath.Join(root, "release\\]")
+	literalCache := filepath.Join(root, "release]", "node_modules")
+	if err := os.MkdirAll(literalCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	findings = scanDirectory(root, 3, patterns, langs, false, nil, nil, nil, ScanFilters{IncludeOnly: []string{escapedLiteral}})
+	if len(findings) != 1 || findings[0].Path != literalCache {
+		t.Fatalf("escaped literal include findings = %+v, want %s", findings, literalCache)
+	}
 }
 
 func TestIncludeOnlyGlobsWithIntermediateWildcards(t *testing.T) {
@@ -974,6 +1022,13 @@ func TestWindowsPathFiltersIgnoreCaseForLiteralAndAncestorMatching(t *testing.T)
 	})
 	if len(excluded) != 0 {
 		t.Fatalf("case-insensitive exclusion got %+v, want no findings", excluded)
+	}
+	rootedProject := strings.TrimPrefix(filepath.Join(root, "Project"), filepath.VolumeName(root))
+	rootedExcluded := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{rootedProject},
+	})
+	if len(rootedExcluded) != 0 {
+		t.Fatalf("drive-rooted exclusion got %+v, want no findings", rootedExcluded)
 	}
 
 	excludedDescendant := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
