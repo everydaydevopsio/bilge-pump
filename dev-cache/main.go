@@ -284,8 +284,20 @@ func pathIsWithin(path, base string) (bool, string) {
 		return false, ""
 	}
 	if runtime.GOOS == "windows" {
-		pathAbs = strings.ToLower(pathAbs)
-		baseAbs = strings.ToLower(baseAbs)
+		// filepath.Rel compares path components using Go's lexical rules, but
+		// Windows filesystems commonly treat component casing as equivalent.
+		// Compare normalized separator paths explicitly so literal, glob, and
+		// ancestor checks all use the same case-insensitive semantics.
+		pathAbs = strings.ToLower(filepath.ToSlash(filepath.Clean(pathAbs)))
+		baseAbs = strings.ToLower(filepath.ToSlash(filepath.Clean(baseAbs)))
+		if pathAbs == baseAbs {
+			return true, "."
+		}
+		prefix := strings.TrimSuffix(baseAbs, "/") + "/"
+		if strings.HasPrefix(pathAbs, prefix) {
+			return true, filepath.FromSlash(strings.TrimPrefix(pathAbs, prefix))
+		}
+		return false, ""
 	}
 	rel, err := filepath.Rel(baseAbs, pathAbs)
 	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -903,6 +915,9 @@ func safeCachePath(f Finding) (bool, string) {
 	rel, err := filepath.Rel(root, cachePath)
 	if err != nil {
 		return false, "cache path is outside its Git repository"
+	}
+	if runtime.GOOS == "windows" {
+		rel = filepath.ToSlash(rel)
 	}
 	tracked := exec.Command("git", "-C", root, "ls-files", "--", rel)
 	if out, err := tracked.Output(); err != nil {

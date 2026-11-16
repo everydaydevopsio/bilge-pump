@@ -148,7 +148,15 @@ func TestExpandHome(t *testing.T) {
 
 func TestDefaultConfigPath(t *testing.T) {
 	p := defaultConfigPath()
-	expectedSuffix := filepath.Join(".config", "dev-cache", "config.yaml")
+	configDir := ".config"
+	if runtime.GOOS == "windows" {
+		var err error
+		configDir, err = os.UserConfigDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	expectedSuffix := filepath.Join(configDir, "dev-cache", "config.yaml")
 	if !strings.HasSuffix(p, expectedSuffix) {
 		t.Fatalf("defaultConfigPath() unexpected: %q", p)
 	}
