@@ -107,6 +107,13 @@ type ScanFilters struct {
 	Now          time.Time
 }
 
+type compiledPathPattern struct {
+	literalPath  string
+	literalOnly  bool
+	literalBase  string
+	patternParts []string
+}
+
 // ----- Utilities -----
 
 func defaultConfigPath() string {
@@ -167,15 +174,84 @@ func expandAndCleanPatterns(patterns []string) []string {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		path := filepath.Clean(expand(strings.TrimSpace(p)))
-		if !filepath.IsAbs(path) {
-			if abs, err := filepath.Abs(path); err == nil {
-				path = abs
-			}
-		}
-		out = append(out, path)
+		out = append(out, filepath.Clean(expand(strings.TrimSpace(p))))
 	}
 	return out
+}
+
+func compilePathPattern(pattern string) (compiledPathPattern, bool) {
+	pattern = filepath.Clean(expand(strings.TrimSpace(pattern)))
+	if pattern == "" {
+		return compiledPathPattern{}, false
+	}
+	parts := splitPathParts(pattern)
+	globIndex := -1
+	for i, part := range parts {
+		if strings.ContainsAny(part, "*?[") {
+			globIndex = i
+			break
+		}
+	}
+	if globIndex < 0 {
+		literalPath := pattern
+		if !filepath.IsAbs(literalPath) {
+			literalPath = filepath.Join(currentWorkingDirectory(), literalPath)
+		}
+		if absolute, err := filepath.Abs(literalPath); err == nil {
+			literalPath = absolute
+		}
+		return compiledPathPattern{literalPath: filepath.Clean(literalPath), literalOnly: true}, true
+	}
+
+	volume := filepath.VolumeName(pattern)
+	isAbsolute := filepath.IsAbs(pattern)
+	literalBase := ""
+	if isAbsolute {
+		literalBase = string(filepath.Separator)
+		if volume != "" {
+			literalBase = volume + string(filepath.Separator)
+		}
+	}
+	for _, part := range parts[:globIndex] {
+		literalBase = filepath.Join(literalBase, part)
+	}
+	if !isAbsolute {
+		literalBase = filepath.Join(currentWorkingDirectory(), literalBase)
+	}
+	if absolute, err := filepath.Abs(literalBase); err == nil {
+		literalBase = absolute
+	}
+	return compiledPathPattern{
+		literalBase:  filepath.Clean(literalBase),
+		patternParts: append([]string(nil), parts[globIndex:]...),
+	}, true
+}
+
+func compilePathPatterns(patterns []string) []compiledPathPattern {
+	compiled := make([]compiledPathPattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		if p, ok := compilePathPattern(pattern); ok {
+			compiled = append(compiled, p)
+		}
+	}
+	return compiled
+}
+
+func currentWorkingDirectory() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
+}
+
+func splitPathParts(path string) []string {
+	path = strings.TrimPrefix(path, filepath.VolumeName(path))
+	path = strings.Trim(path, string(filepath.Separator))
+	if path == "" || path == "." {
+		return nil
+	}
+	return strings.Split(path, string(filepath.Separator))
 }
 
 func validatePathPatterns(patterns []string) error {
@@ -192,31 +268,63 @@ func validatePathPatterns(patterns []string) error {
 	return nil
 }
 
-func matchesPathPattern(path, pattern string) bool {
-	path = filepath.Clean(path)
-	pattern = filepath.Clean(pattern)
-
-	if strings.ContainsAny(pattern, "*?[") {
-		ok, err := filepath.Match(pattern, path)
-		return err == nil && ok
+func matchesPathComponent(pattern, name string) bool {
+	if runtime.GOOS == "windows" {
+		pattern = strings.ToLower(pattern)
+		name = strings.ToLower(name)
 	}
-
-	if path == pattern {
-		return true
-	}
-	return strings.HasPrefix(path, pattern+string(filepath.Separator))
+	matched, err := filepath.Match(pattern, name)
+	return err == nil && matched
 }
 
-func matchesAnyPattern(path string, patterns []string) bool {
-	for _, p := range patterns {
-		if matchesPathPattern(path, p) {
+func pathIsWithin(path, base string) (bool, string) {
+	pathAbs, pathErr := filepath.Abs(path)
+	baseAbs, baseErr := filepath.Abs(base)
+	if pathErr != nil || baseErr != nil {
+		return false, ""
+	}
+	if runtime.GOOS == "windows" {
+		pathAbs = strings.ToLower(pathAbs)
+		baseAbs = strings.ToLower(baseAbs)
+	}
+	rel, err := filepath.Rel(baseAbs, pathAbs)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, rel
+	}
+	return true, rel
+}
+
+func matchesPathPattern(path string, pattern compiledPathPattern) bool {
+	if pattern.literalOnly {
+		within, _ := pathIsWithin(path, pattern.literalPath)
+		return within
+	}
+	within, rel := pathIsWithin(path, pattern.literalBase)
+	if !within {
+		return false
+	}
+	parts := splitPathParts(rel)
+	if len(parts) != len(pattern.patternParts) {
+		return false
+	}
+	for i, part := range parts {
+		if !matchesPathComponent(pattern.patternParts[i], part) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesAnyPattern(path string, patterns []compiledPathPattern) bool {
+	for _, pattern := range patterns {
+		if matchesPathPattern(path, pattern) {
 			return true
 		}
 	}
 	return false
 }
 
-func pathMatchesPatternOrAncestor(path string, patterns []string) bool {
+func pathMatchesPatternOrAncestor(path string, patterns []compiledPathPattern) bool {
 	path = filepath.Clean(path)
 	for current := path; ; current = filepath.Dir(current) {
 		if matchesAnyPattern(current, patterns) {
@@ -229,19 +337,28 @@ func pathMatchesPatternOrAncestor(path string, patterns []string) bool {
 	}
 }
 
-func mayContainPatternMatch(path string, patterns []string) bool {
-	path = filepath.Clean(path)
+func mayContainPatternMatch(path string, patterns []compiledPathPattern) bool {
 	for _, pattern := range patterns {
-		pattern = filepath.Clean(pattern)
-		pathParts := strings.Split(path, string(filepath.Separator))
-		patternParts := strings.Split(pattern, string(filepath.Separator))
-		if len(pathParts) > len(patternParts) {
+		if pattern.literalOnly {
+			if targetWithin, _ := pathIsWithin(pattern.literalPath, path); targetWithin {
+				return true
+			}
+			continue
+		}
+		if prefixWithin, _ := pathIsWithin(pattern.literalBase, path); prefixWithin {
+			return true
+		}
+		within, rel := pathIsWithin(path, pattern.literalBase)
+		if !within {
+			continue
+		}
+		pathParts := splitPathParts(rel)
+		if len(pathParts) > len(pattern.patternParts) {
 			continue
 		}
 		canMatch := true
 		for i, pathPart := range pathParts {
-			matched, err := filepath.Match(patternParts[i], pathPart)
-			if err != nil || !matched {
+			if !matchesPathComponent(pattern.patternParts[i], pathPart) {
 				canMatch = false
 				break
 			}
@@ -895,6 +1012,8 @@ func detectLanguage(dirPath string, langSignatures map[string][]string, langPrio
 // scanDirectory walks through the directory tree up to maxDepth and matches directory names against patterns
 func scanDirectory(root string, maxDepth int, patterns []string, patternToLang map[string]string, detectLang bool, langSignatures map[string][]string, langPriorities map[string]int, langToPatterns map[string][]string, filters ScanFilters) []Finding {
 	var findings []Finding
+	excludePathPatterns := compilePathPatterns(filters.ExcludePaths)
+	includePathPatterns := compilePathPatterns(filters.IncludeOnly)
 
 	// Directories that should not have language detection performed
 	// These directories will still be listed but with null/empty language
@@ -957,12 +1076,12 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 			return filepath.SkipDir
 		}
 
-		included := len(filters.IncludeOnly) == 0 || pathMatchesPatternOrAncestor(cleanPath, filters.IncludeOnly)
-		if len(filters.IncludeOnly) > 0 {
-			if !included && !mayContainPatternMatch(cleanPath, filters.IncludeOnly) {
+		included := len(includePathPatterns) == 0 || pathMatchesPatternOrAncestor(cleanPath, includePathPatterns)
+		if len(includePathPatterns) > 0 {
+			if !included && !mayContainPatternMatch(cleanPath, includePathPatterns) {
 				return filepath.SkipDir
 			}
-		} else if pathMatchesPatternOrAncestor(cleanPath, filters.ExcludePaths) {
+		} else if pathMatchesPatternOrAncestor(cleanPath, excludePathPatterns) {
 			return filepath.SkipDir
 		}
 
@@ -1132,12 +1251,12 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 				// An include-only target can be nested below a cache-named directory.
 				// Keep walking through that ancestor instead of selecting it and
 				// skipping the subtree before the included project is reached.
-				if len(filters.IncludeOnly) > 0 && !included {
+				if len(includePathPatterns) > 0 && !included {
 					break
 				}
 				// An excluded descendant cannot be preserved if the parent cache
 				// directory itself is deleted, so leave the whole cache untouched.
-				if len(filters.IncludeOnly) == 0 && mayContainPatternMatch(cleanPath, filters.ExcludePaths) {
+				if len(includePathPatterns) == 0 && mayContainPatternMatch(cleanPath, excludePathPatterns) {
 					break
 				}
 				// Found a match - calculate size
@@ -1237,14 +1356,14 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 		}
 	}
 
-	if len(filters.IncludeOnly) > 0 {
+	if len(includePathPatterns) > 0 {
 		filtered := findings[:0]
 		for _, f := range findings {
 			candidate := f.Path
 			if !isCacheDirectory(f) && f.ProjectRoot != "" {
 				candidate = f.ProjectRoot
 			}
-			if pathMatchesPatternOrAncestor(candidate, filters.IncludeOnly) {
+			if pathMatchesPatternOrAncestor(candidate, includePathPatterns) {
 				filtered = append(filtered, f)
 			}
 		}

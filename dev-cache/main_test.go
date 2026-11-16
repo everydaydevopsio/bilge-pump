@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -899,6 +900,81 @@ func TestIncludeOnlyGlobsWithIntermediateWildcards(t *testing.T) {
 	}
 }
 
+func TestRelativePathFiltersTreatWorkingDirectoryGlobCharactersLiterally(t *testing.T) {
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(t.TempDir(), "workspace[1]")
+	if err := os.MkdirAll(filepath.Join(workDir, "project", "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "project", "node_modules", "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	patterns := []string{"node_modules"}
+	patternToLang := map[string]string{"node_modules": "node"}
+	excluded := scanDirectory(".", 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: expandAndCleanPatterns([]string{"./project"}),
+	})
+	if len(excluded) != 0 {
+		t.Fatalf("relative exclusion under glob-character working directory got %+v, want no findings", excluded)
+	}
+
+	included := scanDirectory(".", 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: expandAndCleanPatterns([]string{"./project"}),
+	})
+	if len(included) != 1 || filepath.Base(included[0].Path) != "node_modules" {
+		t.Fatalf("relative include under glob-character working directory got %+v, want project cache", included)
+	}
+}
+
+func TestWindowsPathFiltersIgnoreCaseForLiteralAndAncestorMatching(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows path casing semantics")
+	}
+	root := t.TempDir()
+	cache := filepath.Join(root, "Project", "node_modules")
+	if err := os.MkdirAll(filepath.Join(cache, "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	patterns := []string{"node_modules"}
+	patternToLang := map[string]string{"node_modules": "node"}
+	excluded := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{filepath.Join(root, "project")},
+	})
+	if len(excluded) != 0 {
+		t.Fatalf("case-insensitive exclusion got %+v, want no findings", excluded)
+	}
+
+	excludedDescendant := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{filepath.Join(root, "project", "node_modules", "keep")},
+	})
+	if len(excludedDescendant) != 0 {
+		t.Fatalf("case-insensitive excluded descendant got %+v, want parent cache omitted", excludedDescendant)
+	}
+
+	included := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{filepath.Join(root, "project")},
+	})
+	if len(included) != 1 || filepath.Base(included[0].Path) != "node_modules" {
+		t.Fatalf("case-insensitive inclusion got %+v, want project cache", included)
+	}
+}
+
 func TestIncludeOnlyTraversesThroughCacheNamedAncestor(t *testing.T) {
 	root := t.TempDir()
 	projectCache := filepath.Join(root, "src", "build", "project", "node_modules")
@@ -1033,11 +1109,15 @@ func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
 	}
 
 	now := time.Now()
-	excludedCache := filepath.Join(repo, "excluded", "node_modules")
-	tooNewCache := filepath.Join(repo, "too-new", "node_modules")
-	eligibleCache := filepath.Join(repo, "eligible", "node_modules")
+	excludedCache := filepath.Join(repo, "team", "excluded", "node_modules")
+	tooNewCache := filepath.Join(repo, "team", "too-new", "node_modules")
+	eligibleCache := filepath.Join(repo, "team", "eligible", "node_modules")
 	for _, cache := range []string{excludedCache, tooNewCache, eligibleCache} {
 		if err := os.MkdirAll(cache, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		projectRoot := filepath.Dir(cache)
+		if err := os.WriteFile(filepath.Join(projectRoot, "package.json"), []byte(`{"name":"fixture"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
@@ -1057,10 +1137,11 @@ func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
 		Options: Options{
 			DefaultScanPath: repo,
 			MaxDepth:        4,
-			ExcludePaths:    []string{filepath.Join(repo, "excluded")},
+			DetectLanguage:  true,
+			ExcludePaths:    []string{filepath.Join(repo, "team", "excluded")},
 			MinAge:          "90d",
 		},
-		Languages: []Language{{Name: "node", Enabled: true, Patterns: []string{"node_modules"}}},
+		Languages: []Language{{Name: "node", Enabled: true, Patterns: []string{"node_modules"}, Signatures: []string{"package.json"}}},
 	}
 	configBytes, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -1071,7 +1152,11 @@ func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binary := filepath.Join(t.TempDir(), "dev-cache")
+	binaryName := "dev-cache"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binary := filepath.Join(t.TempDir(), binaryName)
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build dev-cache: %v: %s", err, output)
