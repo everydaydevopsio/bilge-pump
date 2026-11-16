@@ -194,17 +194,14 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 	}
 	if globIndex < 0 {
 		literalPath := pattern
-		if !filepath.IsAbs(literalPath) {
+		if !isAbsolutePath(literalPath) {
 			literalPath = filepath.Join(currentWorkingDirectory(), literalPath)
 		}
-		if absolute, err := filepath.Abs(literalPath); err == nil {
-			literalPath = absolute
-		}
-		return compiledPathPattern{literalPath: filepath.Clean(literalPath), literalOnly: true}, true
+		return compiledPathPattern{literalPath: absolutePath(literalPath), literalOnly: true}, true
 	}
 
 	volume := filepath.VolumeName(pattern)
-	isAbsolute := filepath.IsAbs(pattern)
+	isAbsolute := isAbsolutePath(pattern)
 	literalBase := ""
 	if isAbsolute {
 		literalBase = string(filepath.Separator)
@@ -218,9 +215,7 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 	if !isAbsolute {
 		literalBase = filepath.Join(currentWorkingDirectory(), literalBase)
 	}
-	if absolute, err := filepath.Abs(literalBase); err == nil {
-		literalBase = absolute
-	}
+	literalBase = absolutePath(literalBase)
 	return compiledPathPattern{
 		literalBase:  filepath.Clean(literalBase),
 		patternParts: append([]string(nil), parts[globIndex:]...),
@@ -243,6 +238,26 @@ func currentWorkingDirectory() string {
 		return "."
 	}
 	return cwd
+}
+
+func isAbsolutePath(path string) bool {
+	if filepath.IsAbs(path) {
+		return true
+	}
+	if runtime.GOOS == "windows" && len(path) >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+		return (path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')
+	}
+	return false
+}
+
+func absolutePath(path string) string {
+	if isAbsolutePath(path) {
+		return filepath.Clean(path)
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute
+	}
+	return filepath.Clean(path)
 }
 
 func splitPathParts(path string) []string {
@@ -278,11 +293,8 @@ func matchesPathComponent(pattern, name string) bool {
 }
 
 func pathIsWithin(path, base string) (bool, string) {
-	pathAbs, pathErr := filepath.Abs(path)
-	baseAbs, baseErr := filepath.Abs(base)
-	if pathErr != nil || baseErr != nil {
-		return false, ""
-	}
+	pathAbs := absolutePath(path)
+	baseAbs := absolutePath(base)
 	if runtime.GOOS == "windows" {
 		// filepath.Rel compares path components using Go's lexical rules, but
 		// Windows filesystems commonly treat component casing as equivalent.
