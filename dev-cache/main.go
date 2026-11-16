@@ -134,8 +134,17 @@ func defaultConfigPath() string {
 
 func ensureDir(p string) error { return os.MkdirAll(filepath.Dir(p), 0o755) }
 
-func home() string           { h, _ := os.UserHomeDir(); return h }
-func expand(p string) string { return os.ExpandEnv(strings.ReplaceAll(p, "~", home())) }
+func home() string { h, _ := os.UserHomeDir(); return h }
+func expand(p string) string {
+	p = os.ExpandEnv(p)
+	if p == "~" {
+		return home()
+	}
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
+		return filepath.Join(home(), p[2:])
+	}
+	return p
+}
 
 func splitCSV(v string) []string {
 	if strings.TrimSpace(v) == "" {
