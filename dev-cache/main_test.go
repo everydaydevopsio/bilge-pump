@@ -952,6 +952,14 @@ func TestWindowsPathFiltersIgnoreCaseForLiteralAndAncestorMatching(t *testing.T)
 	}
 	root := t.TempDir()
 	cache := filepath.Join(root, "Project", "node_modules")
+	compiled, ok := compilePathPattern(filepath.Join(root, "project"))
+	if !ok {
+		t.Fatal("failed to compile Windows literal path")
+	}
+	within, rel := pathIsWithin(cache, compiled.literalPath)
+	if !within {
+		t.Fatalf("case-insensitive containment failed: path=%q base=%q rel=%q", cache, compiled.literalPath, rel)
+	}
 	if err := os.MkdirAll(filepath.Join(cache, "keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
