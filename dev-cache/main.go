@@ -265,6 +265,9 @@ func isAbsolutePath(path string) bool {
 }
 
 func absolutePath(path string) string {
+	if runtime.GOOS == "windows" && filepath.VolumeName(path) == "" && len(path) > 0 && (path[0] == '\\' || path[0] == '/') {
+		return filepath.Clean(filepath.VolumeName(currentWorkingDirectory()) + path)
+	}
 	if isAbsolutePath(path) && (runtime.GOOS != "windows" || filepath.VolumeName(path) != "") {
 		return filepath.Clean(path)
 	}

@@ -1024,6 +1024,11 @@ func TestWindowsPathFiltersIgnoreCaseForLiteralAndAncestorMatching(t *testing.T)
 		t.Fatalf("case-insensitive exclusion got %+v, want no findings", excluded)
 	}
 	rootedProject := strings.TrimPrefix(filepath.Join(root, "Project"), filepath.VolumeName(root))
+	rootedCompiled, ok := compilePathPattern(rootedProject)
+	wantRootedProject := filepath.VolumeName(root) + rootedProject
+	if !ok || rootedCompiled.literalPath != filepath.Clean(wantRootedProject) {
+		t.Fatalf("drive-rooted filter compiled to %q, want %q", rootedCompiled.literalPath, wantRootedProject)
+	}
 	rootedExcluded := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
 		ExcludePaths: []string{rootedProject},
 	})
