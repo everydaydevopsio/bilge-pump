@@ -858,10 +858,27 @@ func TestValidatePathPatterns(t *testing.T) {
 	if err := validatePathPatterns([]string{"./src/project["}); err == nil {
 		t.Fatal("malformed exclusion glob was accepted")
 	}
-	for _, pattern := range []string{"./src/*/project[", "./src/team-["} {
+	for _, pattern := range []string{"./src/*/project[", "./src/team-[", "./src/*/project[a-]", "./src/team-*[a-]"} {
 		if err := validatePathPatterns([]string{pattern}); err == nil {
 			t.Errorf("malformed exclusion glob %q was accepted", pattern)
 		}
+	}
+}
+
+func TestBangCharacterClassMatchesLiteralExclamation(t *testing.T) {
+	if err := validatePathPatterns([]string{"./src/project[!]"}); err != nil {
+		t.Fatalf("valid exclamation character class rejected: %v", err)
+	}
+	root := t.TempDir()
+	cache := filepath.Join(root, "project!", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	findings := scanDirectory(root, 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{filepath.Join(root, "project[!]")},
+	})
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("[!] include filter findings = %+v, want %s", findings, cache)
 	}
 }
 

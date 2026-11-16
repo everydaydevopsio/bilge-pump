@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/olekukonko/tablewriter"
 	yaml "gopkg.in/yaml.v3"
@@ -317,31 +318,53 @@ func validateGlobComponent(pattern string) error {
 				return fmt.Errorf("trailing escape")
 			}
 		case '[':
-			start := i + 1
-			if start < len(pattern) && (pattern[start] == '!' || pattern[start] == '^') {
-				start++
+			j := i + 1
+			if j < len(pattern) && pattern[j] == '^' {
+				j++
 			}
-			if start < len(pattern) && pattern[start] == ']' {
-				start++
-			}
-			closed := false
-			for j := start; j < len(pattern); j++ {
-				if pattern[j] == '\\' && runtime.GOOS != "windows" {
-					j++
-					continue
-				}
-				if pattern[j] == ']' {
-					closed = true
+			ranges := 0
+			for {
+				if j < len(pattern) && pattern[j] == ']' && ranges > 0 {
 					i = j
 					break
 				}
-			}
-			if !closed {
-				return fmt.Errorf("unterminated character class")
+				lo, next, err := readGlobClassRune(pattern, j)
+				if err != nil {
+					return err
+				}
+				j = next
+				if j < len(pattern) && pattern[j] == '-' {
+					hi, after, err := readGlobClassRune(pattern, j+1)
+					if err != nil {
+						return err
+					}
+					if hi < lo {
+						return fmt.Errorf("descending character range")
+					}
+					j = after
+				}
+				ranges++
 			}
 		}
 	}
 	return nil
+}
+
+func readGlobClassRune(pattern string, index int) (rune, int, error) {
+	if index >= len(pattern) || pattern[index] == '-' || pattern[index] == ']' {
+		return 0, index, fmt.Errorf("invalid character class")
+	}
+	if pattern[index] == '\\' && runtime.GOOS != "windows" {
+		index++
+		if index >= len(pattern) {
+			return 0, index, fmt.Errorf("trailing escape in character class")
+		}
+	}
+	r, size := utf8.DecodeRuneInString(pattern[index:])
+	if r == utf8.RuneError && size == 1 {
+		return 0, index, fmt.Errorf("invalid UTF-8 in character class")
+	}
+	return r, index + size, nil
 }
 
 func matchesPathComponent(pattern, name string) bool {
