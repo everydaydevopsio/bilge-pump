@@ -538,6 +538,22 @@ func passesAgeFilter(f Finding, filters ScanFilters) bool {
 	return true
 }
 
+func recheckAgeEligibility(f Finding, filters ScanFilters, now time.Time) (bool, error) {
+	if filters.MinAge <= 0 && filters.MaxAge <= 0 {
+		return true, nil
+	}
+	fresh, err := inspectPath(f.Path)
+	if err != nil {
+		return false, err
+	}
+	if fresh.Err != "" {
+		return false, fmt.Errorf("incomplete cache inspection: %s", fresh.Err)
+	}
+	fresh.Pattern = f.Pattern
+	filters.Now = now
+	return passesAgeFilter(fresh, filters), nil
+}
+
 func checkVersionFlag() bool {
 	for _, arg := range os.Args[1:] {
 		if arg == "-version" || arg == "--version" {
@@ -932,6 +948,15 @@ func main() {
 		var errors []string
 
 		for _, f := range cacheFindings {
+			ageEligible, ageErr := recheckAgeEligibility(f, filters, time.Now())
+			if ageErr != nil {
+				errors = append(errors, fmt.Sprintf("skipped %s: cannot verify age eligibility: %v", f.Path, ageErr))
+				continue
+			}
+			if !ageEligible {
+				errors = append(errors, fmt.Sprintf("skipped %s: age filter no longer passes", f.Path))
+				continue
+			}
 			if !*flagUnsafeClean {
 				allowed, reason := safeCachePath(f)
 				if !allowed {

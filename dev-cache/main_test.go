@@ -1203,6 +1203,43 @@ func TestPassesAgeFilterRejectsPartialInspection(t *testing.T) {
 	}
 }
 
+func TestRecheckAgeEligibilityRejectsCacheRefreshedAfterScan(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(cache, "cache.dat")
+	if err := os.WriteFile(file, []byte("old cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	finding, err := inspectPath(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding.Pattern = "node_modules"
+	filters := ScanFilters{Now: now, MinAge: 24 * time.Hour}
+	if !passesAgeFilter(finding, filters) {
+		t.Fatal("fixture should pass the initial scan age filter")
+	}
+
+	refreshed := time.Now()
+	if err := os.Chtimes(file, refreshed, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	eligible, err := recheckAgeEligibility(finding, filters, time.Now())
+	if err != nil {
+		t.Fatalf("recheckAgeEligibility: %v", err)
+	}
+	if eligible {
+		t.Fatal("refreshed cache remained eligible for cleanup")
+	}
+}
+
 func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
 	repo := t.TempDir()
 	gitignore := filepath.Join(repo, ".gitignore")
