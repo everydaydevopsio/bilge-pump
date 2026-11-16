@@ -999,6 +999,18 @@ func TestWindowsPathFiltersIgnoreCaseForLiteralAndAncestorMatching(t *testing.T)
 		t.Skip("native Windows path casing semantics")
 	}
 	root := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
 	cache := filepath.Join(root, "Project", "node_modules")
 	compiled, ok := compilePathPattern(filepath.Join(root, "project"))
 	if !ok {
