@@ -178,15 +178,29 @@ func applyFilterOverrides(options Options, values map[string]string, explicitlyS
 	return options
 }
 
-func expandAndCleanPatterns(patterns []string) []string {
+func expandFilterPatterns(patterns []string) ([]string, error) {
 	out := make([]string, 0, len(patterns))
 	for _, p := range patterns {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		out = append(out, filepath.Clean(os.ExpandEnv(strings.TrimSpace(p))))
+		var unresolved string
+		expanded := os.Expand(strings.TrimSpace(p), func(key string) string {
+			value, ok := os.LookupEnv(key)
+			if !ok && unresolved == "" {
+				unresolved = key
+			}
+			return value
+		})
+		if unresolved != "" {
+			return nil, fmt.Errorf("environment variable %q is not set", unresolved)
+		}
+		if strings.TrimSpace(expanded) == "" {
+			return nil, fmt.Errorf("path pattern %q expands to an empty value", p)
+		}
+		out = append(out, expanded)
 	}
-	return out
+	return out, nil
 }
 
 func compilePathPattern(pattern string) (compiledPathPattern, bool) {
@@ -304,7 +318,6 @@ func validatePathPatterns(patterns []string) error {
 		if pattern == "" {
 			continue
 		}
-		pattern = filepath.Clean(pattern)
 		for _, component := range splitPathParts(pattern) {
 			if err := validateGlobComponent(component); err != nil {
 				return fmt.Errorf("invalid path pattern %q: %w", pattern, err)
@@ -799,8 +812,16 @@ func main() {
 		"min-age":      *flagMinAge,
 		"max-age":      *flagMaxAge,
 	}, explicitFlags)
-	filterOptions.ExcludePaths = expandAndCleanPatterns(filterOptions.ExcludePaths)
-	filterOptions.IncludeOnly = expandAndCleanPatterns(filterOptions.IncludeOnly)
+	filterOptions.ExcludePaths, err = expandFilterPatterns(filterOptions.ExcludePaths)
+	if err != nil {
+		fmt.Println("invalid path filter:", err)
+		os.Exit(1)
+	}
+	filterOptions.IncludeOnly, err = expandFilterPatterns(filterOptions.IncludeOnly)
+	if err != nil {
+		fmt.Println("invalid path filter:", err)
+		os.Exit(1)
+	}
 	for _, patterns := range [][]string{filterOptions.ExcludePaths, filterOptions.IncludeOnly} {
 		if err := validatePathPatterns(patterns); err != nil {
 			fmt.Println("invalid path filter:", err)
@@ -989,7 +1010,7 @@ func main() {
 		fmt.Println("\nDeleting cache directories...")
 		var deletedCount int
 		var freedBytes int64
-		var errors []string
+		var cleanupErrors []string
 
 		for _, f := range cacheFindings {
 			var checkSafe func() error
@@ -997,18 +1018,18 @@ func main() {
 				checkSafe = func() error {
 					allowed, reason := safeCachePath(f)
 					if !allowed {
-						return fmt.Errorf("%s", reason)
+						return errors.New(reason)
 					}
 					return nil
 				}
 			}
 			fresh, deleted, deleteErr := removeCacheIfEligible(f, filters, checkSafe, time.Now(), os.RemoveAll)
 			if deleteErr != nil {
-				errors = append(errors, fmt.Sprintf("skipped %s: %v", f.Path, deleteErr))
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("skipped %s: %v", f.Path, deleteErr))
 				continue
 			}
 			if !deleted {
-				errors = append(errors, fmt.Sprintf("skipped %s: age filter no longer passes", f.Path))
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("skipped %s: age filter no longer passes", f.Path))
 				continue
 			}
 			deletedCount++
@@ -1021,10 +1042,10 @@ func main() {
 		}
 		fmt.Println()
 
-		if len(errors) > 0 {
+		if len(cleanupErrors) > 0 {
 			partialFailure = true
 			fmt.Println("\nErrors:")
-			for _, e := range errors {
+			for _, e := range cleanupErrors {
 				fmt.Printf("  - %s\n", e)
 			}
 		}
@@ -1204,6 +1225,7 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 	if err == nil {
 		root = rootAbs
 	}
+	filterRoot := root
 	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		if resolved, err := filepath.EvalSymlinks(root); err == nil {
 			root = filepath.Clean(resolved)
@@ -1248,6 +1270,10 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 			// Can't calculate relative path, skip
 			return nil
 		}
+		filterPath := cleanPath
+		if filterRoot != root {
+			filterPath = filepath.Join(filterRoot, relPath)
+		}
 
 		// Count separators in relative path to get depth
 		// Empty relPath means root (shouldn't happen due to check above)
@@ -1258,12 +1284,12 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 			return filepath.SkipDir
 		}
 
-		included := len(includePathPatterns) == 0 || pathMatchesPatternOrAncestor(cleanPath, includePathPatterns)
+		included := len(includePathPatterns) == 0 || pathMatchesPatternOrAncestor(cleanPath, includePathPatterns) || pathMatchesPatternOrAncestor(filterPath, includePathPatterns)
 		if len(includePathPatterns) > 0 {
-			if !included && !mayContainPatternMatch(cleanPath, includePathPatterns) {
+			if !included && !mayContainPatternMatch(cleanPath, includePathPatterns) && !mayContainPatternMatch(filterPath, includePathPatterns) {
 				return filepath.SkipDir
 			}
-		} else if pathMatchesPatternOrAncestor(cleanPath, excludePathPatterns) {
+		} else if pathMatchesPatternOrAncestor(cleanPath, excludePathPatterns) || pathMatchesPatternOrAncestor(filterPath, excludePathPatterns) {
 			return filepath.SkipDir
 		}
 
@@ -1438,7 +1464,7 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 				}
 				// An excluded descendant cannot be preserved if the parent cache
 				// directory itself is deleted, so leave the whole cache untouched.
-				if len(includePathPatterns) == 0 && mayContainPatternMatch(cleanPath, excludePathPatterns) {
+				if len(includePathPatterns) == 0 && (mayContainPatternMatch(cleanPath, excludePathPatterns) || mayContainPatternMatch(filterPath, excludePathPatterns)) {
 					break
 				}
 				// Found a match - calculate size

@@ -15,6 +15,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func expandAndCleanPatterns(patterns []string) []string {
+	expanded, err := expandFilterPatterns(patterns)
+	if err != nil {
+		panic(err)
+	}
+	return expanded
+}
+
 func TestSafeCachePathFindsNestedRepositoryFromCachePath(t *testing.T) {
 	team := filepath.Join(t.TempDir(), "team")
 	repo := filepath.Join(team, "repo")
@@ -858,7 +866,7 @@ func TestValidatePathPatterns(t *testing.T) {
 	if err := validatePathPatterns([]string{"./src/project["}); err == nil {
 		t.Fatal("malformed exclusion glob was accepted")
 	}
-	for _, pattern := range []string{"./src/*/project[", "./src/team-[", "./src/*/project[a-]", "./src/team-*[a-]"} {
+	for _, pattern := range []string{"./src/*/project[", "./src/team-[", "./src/*/project[a-]", "./src/team-*[a-]", "./src/project[/.."} {
 		if err := validatePathPatterns([]string{pattern}); err == nil {
 			t.Errorf("malformed exclusion glob %q was accepted", pattern)
 		}
@@ -886,23 +894,53 @@ func TestScanDirectoryExclusionsMatchSymlinkAliases(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink privileges vary on Windows runners")
 	}
-	realRoot := t.TempDir()
-	cache := filepath.Join(realRoot, "team", "project", "node_modules")
+	workspace := t.TempDir()
+	realRoot := filepath.Join(workspace, "src", "projects")
+	cache := filepath.Join(realRoot, "project", "node_modules")
 	if err := os.MkdirAll(cache, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	aliasRoot := filepath.Join(t.TempDir(), "alias")
+	aliasRoot := filepath.Join(workspace, "src", "link")
+	if err := os.MkdirAll(filepath.Dir(aliasRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(realRoot, aliasRoot); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	findings := scanDirectory(aliasRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
-		ExcludePaths: []string{filepath.Join(realRoot, "team", "project")},
+	for _, exclusion := range []string{
+		filepath.Join(realRoot, "project"),
+		filepath.Join(workspace, "src", "l*", "project"),
+	} {
+		findings := scanDirectory(aliasRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+			ExcludePaths: []string{exclusion},
+		})
+		if len(findings) != 0 {
+			t.Fatalf("symlinked scan selected excluded cache for %q: %+v", exclusion, findings)
+		}
+	}
+}
+
+func TestExpandFilterPatternsRejectsUnsetVariables(t *testing.T) {
+	previous, wasSet := os.LookupEnv("BILGE_TEST_FILTER_ROOT")
+	if err := os.Unsetenv("BILGE_TEST_FILTER_ROOT"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("BILGE_TEST_FILTER_ROOT", previous)
+		} else {
+			_ = os.Unsetenv("BILGE_TEST_FILTER_ROOT")
+		}
 	})
-	if len(findings) != 0 {
-		t.Fatalf("symlinked scan selected excluded cache: %+v", findings)
+	if _, err := expandFilterPatterns([]string{"$BILGE_TEST_FILTER_ROOT"}); err == nil {
+		t.Fatal("unset environment variable was accepted as an include path")
+	}
+	t.Setenv("BILGE_TEST_FILTER_ROOT", "")
+	if _, err := expandFilterPatterns([]string{"$BILGE_TEST_FILTER_ROOT"}); err == nil {
+		t.Fatal("empty environment expansion was accepted as an include path")
 	}
 }
 
