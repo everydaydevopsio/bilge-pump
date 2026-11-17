@@ -379,6 +379,20 @@ func matchesPathComponent(pattern, name string) bool {
 func pathIsWithin(path, base string) (bool, string) {
 	pathAbs := absolutePath(path)
 	baseAbs := absolutePath(base)
+	if within, rel := pathIsWithinAbsolute(pathAbs, baseAbs); within {
+		return true, rel
+	}
+	// Lexical comparison cannot see through a symlink alias. Resolve both
+	// existing paths as a fallback so equivalent scan and filter paths agree.
+	resolvedPath, pathErr := filepath.EvalSymlinks(pathAbs)
+	resolvedBase, baseErr := filepath.EvalSymlinks(baseAbs)
+	if pathErr == nil && baseErr == nil {
+		return pathIsWithinAbsolute(filepath.Clean(resolvedPath), filepath.Clean(resolvedBase))
+	}
+	return false, ""
+}
+
+func pathIsWithinAbsolute(pathAbs, baseAbs string) (bool, string) {
 	if runtime.GOOS == "windows" {
 		// filepath.Rel compares path components using Go's lexical rules, but
 		// Windows filesystems commonly treat component casing as equivalent.
@@ -1164,6 +1178,11 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 	rootAbs, err := filepath.Abs(root)
 	if err == nil {
 		root = rootAbs
+	}
+	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = filepath.Clean(resolved)
+		}
 	}
 
 	// Cache for language detection results to avoid repeated directory reads

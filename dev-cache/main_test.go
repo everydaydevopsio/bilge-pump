@@ -882,6 +882,30 @@ func TestBangCharacterClassMatchesLiteralExclamation(t *testing.T) {
 	}
 }
 
+func TestScanDirectoryExclusionsMatchSymlinkAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink privileges vary on Windows runners")
+	}
+	realRoot := t.TempDir()
+	cache := filepath.Join(realRoot, "team", "project", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	findings := scanDirectory(aliasRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{filepath.Join(realRoot, "team", "project")},
+	})
+	if len(findings) != 0 {
+		t.Fatalf("symlinked scan selected excluded cache: %+v", findings)
+	}
+}
+
 func TestCompilePathPatternDoesNotExpandEnvironmentValuesTwice(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "tree$tag")
 	t.Setenv("CACHE_ROOT", root)
