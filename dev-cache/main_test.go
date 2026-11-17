@@ -918,6 +918,30 @@ func TestCompilePathPatternDoesNotExpandEnvironmentValuesTwice(t *testing.T) {
 	}
 }
 
+func TestHomeFilterPrefixIsLiteral(t *testing.T) {
+	homeDir := filepath.Join(t.TempDir(), "user[1]")
+	if err := os.MkdirAll(filepath.Join(homeDir, "src", "project", "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	cache := filepath.Join(homeDir, "src", "project", "node_modules")
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	filters := ScanFilters{ExcludePaths: expandAndCleanPatterns([]string{"~/src/project"})}
+	findings := scanDirectory(filepath.Join(homeDir, "src"), 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	if len(findings) != 0 {
+		t.Fatalf("home-prefixed exclusion treated home metacharacters as glob syntax: %+v", findings)
+	}
+
+	filters = ScanFilters{IncludeOnly: expandAndCleanPatterns([]string{"~/src/project"})}
+	findings = scanDirectory(filepath.Join(homeDir, "src"), 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("home-prefixed inclusion did not select project cache: %+v", findings)
+	}
+}
+
 func TestEscapedUnixPathComponentsMatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix filepath.Match escape semantics")
@@ -1251,16 +1275,32 @@ func TestRecheckAgeEligibilityRejectsCacheRefreshedAfterScan(t *testing.T) {
 		t.Fatal("fixture should pass the initial scan age filter")
 	}
 
-	refreshed := time.Now()
-	if err := os.Chtimes(file, refreshed, refreshed); err != nil {
-		t.Fatal(err)
+	checkSafe := func() error {
+		refreshed := time.Now()
+		if err := os.WriteFile(file, []byte("refreshed cache with more data"), 0o644); err != nil {
+			return err
+		}
+		return os.Chtimes(file, refreshed, refreshed)
 	}
-	eligible, err := recheckAgeEligibility(finding, filters, time.Now())
+	fresh, deleted, err := removeCacheIfEligible(finding, filters, checkSafe, time.Now(), os.RemoveAll)
 	if err != nil {
-		t.Fatalf("recheckAgeEligibility: %v", err)
+		t.Fatalf("removeCacheIfEligible: %v", err)
 	}
-	if eligible {
+	if deleted {
 		t.Fatal("refreshed cache remained eligible for cleanup")
+	}
+	if fresh.SizeBytes <= finding.SizeBytes {
+		t.Fatalf("fresh finding size = %d, want updated size above %d", fresh.SizeBytes, finding.SizeBytes)
+	}
+	var freedBytes int64
+	if deleted {
+		freedBytes += fresh.SizeBytes
+	}
+	if freedBytes != 0 {
+		t.Fatal("preserved refreshed cache was reported as freed")
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("refreshed cache was removed: %v", err)
 	}
 }
 
@@ -1278,7 +1318,8 @@ func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
 	excludedCache := filepath.Join(repo, "team", "excluded", "node_modules")
 	tooNewCache := filepath.Join(repo, "team", "too-new", "node_modules")
 	eligibleCache := filepath.Join(repo, "team", "eligible", "node_modules")
-	for _, cache := range []string{excludedCache, tooNewCache, eligibleCache} {
+	trackedCache := filepath.Join(repo, "team", "tracked", "node_modules")
+	for _, cache := range []string{excludedCache, tooNewCache, eligibleCache, trackedCache} {
 		if err := os.MkdirAll(cache, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1290,12 +1331,27 @@ func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	old := now.Add(-60 * 24 * time.Hour)
-	if err := os.Chtimes(filepath.Join(excludedCache, "cache.dat"), old, old); err != nil {
+	trackedFile := filepath.Join(trackedCache, "tracked.dat")
+	if err := os.WriteFile(trackedFile, []byte("tracked"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(filepath.Join(eligibleCache, "cache.dat"), old, old); err != nil {
+	relTracked, err := filepath.Rel(repo, trackedFile)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repo, "add", "-f", filepath.ToSlash(relTracked)).CombinedOutput(); err != nil {
+		t.Fatalf("git add tracked cache file: %v: %s", err, output)
+	}
+	old := now.Add(-60 * 24 * time.Hour)
+	for _, path := range []string{
+		filepath.Join(excludedCache, "cache.dat"),
+		filepath.Join(eligibleCache, "cache.dat"),
+		filepath.Join(trackedCache, "cache.dat"),
+		trackedFile,
+	} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	cfg := Config{
@@ -1328,11 +1384,18 @@ func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
 		t.Fatalf("build dev-cache: %v: %s", err, output)
 	}
 	command := exec.Command(binary, "--config", configPath, "--clean", "--yes", "--min-age", "30d")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("dev-cache cleanup: %v: %s", err, output)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+			t.Fatalf("dev-cache cleanup: %v: %s", err, output)
+		}
+	}
+	if !bytes.Contains(output, []byte("contains Git-tracked files")) {
+		t.Fatalf("cleanup output did not report tracked-cache protection: %s", output)
 	}
 
-	for _, cache := range []string{excludedCache, tooNewCache} {
+	for _, cache := range []string{excludedCache, tooNewCache, trackedCache} {
 		if _, err := os.Stat(cache); err != nil {
 			t.Errorf("protected cache %s should remain: %v", cache, err)
 		}

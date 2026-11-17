@@ -184,7 +184,7 @@ func expandAndCleanPatterns(patterns []string) []string {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		out = append(out, filepath.Clean(expand(strings.TrimSpace(p))))
+		out = append(out, filepath.Clean(os.ExpandEnv(strings.TrimSpace(p))))
 	}
 	return out
 }
@@ -193,6 +193,13 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 	pattern = filepath.Clean(strings.TrimSpace(pattern))
 	if pattern == "" {
 		return compiledPathPattern{}, false
+	}
+	homePrefix := pattern == "~" || strings.HasPrefix(pattern, "~/") || strings.HasPrefix(pattern, "~\\")
+	if pattern == "~" {
+		return compiledPathPattern{literalPath: filepath.Clean(home()), literalOnly: true}, true
+	}
+	if homePrefix {
+		pattern = pattern[2:]
 	}
 	parts := splitPathParts(pattern)
 	globIndex := -1
@@ -204,7 +211,9 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 	}
 	if globIndex < 0 {
 		literalPath := pattern
-		if !isAbsolutePath(literalPath) && filepath.VolumeName(literalPath) == "" {
+		if homePrefix {
+			literalPath = filepath.Join(home(), literalPath)
+		} else if !isAbsolutePath(literalPath) && filepath.VolumeName(literalPath) == "" {
 			literalPath = filepath.Join(currentWorkingDirectory(), literalPath)
 		}
 		return compiledPathPattern{literalPath: absolutePath(literalPath), literalOnly: true}, true
@@ -218,13 +227,15 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 		if volume != "" {
 			literalBase = volume + string(filepath.Separator)
 		}
+	} else if homePrefix {
+		literalBase = home()
 	} else if volume != "" {
 		literalBase = volume
 	}
 	for _, part := range parts[:globIndex] {
 		literalBase = filepath.Join(literalBase, part)
 	}
-	if !isAbsolute && volume == "" {
+	if !isAbsolute && volume == "" && !homePrefix {
 		literalBase = filepath.Join(currentWorkingDirectory(), literalBase)
 	}
 	literalBase = absolutePath(literalBase)
@@ -552,20 +563,39 @@ func passesAgeFilter(f Finding, filters ScanFilters) bool {
 	return true
 }
 
-func recheckAgeEligibility(f Finding, filters ScanFilters, now time.Time) (bool, error) {
+func recheckAgeEligibility(f Finding, filters ScanFilters, now time.Time) (Finding, bool, error) {
 	if filters.MinAge <= 0 && filters.MaxAge <= 0 {
-		return true, nil
+		return f, true, nil
 	}
 	fresh, err := inspectPath(f.Path)
 	if err != nil {
-		return false, err
+		return fresh, false, err
 	}
 	if fresh.Err != "" {
-		return false, fmt.Errorf("incomplete cache inspection: %s", fresh.Err)
+		return fresh, false, fmt.Errorf("incomplete cache inspection: %s", fresh.Err)
 	}
 	fresh.Pattern = f.Pattern
 	filters.Now = now
-	return passesAgeFilter(fresh, filters), nil
+	return fresh, passesAgeFilter(fresh, filters), nil
+}
+
+func removeCacheIfEligible(f Finding, filters ScanFilters, checkSafe func() error, now time.Time, remove func(string) error) (Finding, bool, error) {
+	if checkSafe != nil {
+		if err := checkSafe(); err != nil {
+			return f, false, err
+		}
+	}
+	fresh, eligible, err := recheckAgeEligibility(f, filters, now)
+	if err != nil {
+		return fresh, false, fmt.Errorf("cannot verify age eligibility: %w", err)
+	}
+	if !eligible {
+		return fresh, false, nil
+	}
+	if err := remove(f.Path); err != nil {
+		return fresh, false, err
+	}
+	return fresh, true, nil
 }
 
 func checkVersionFlag() bool {
@@ -917,7 +947,7 @@ func main() {
 	partialFailure := false
 	// Cleanup if requested
 	if *flagClean {
-		cacheFindings, cacheTotal := filterCacheFindings(findings)
+		cacheFindings, _ := filterCacheFindings(findings)
 
 		if len(cacheFindings) == 0 {
 			fmt.Println("\nNo cache directories found to delete.")
@@ -957,42 +987,37 @@ func main() {
 		}
 
 		fmt.Println("\nDeleting cache directories...")
-		beforeTotal := cacheTotal
 		var deletedCount int
+		var freedBytes int64
 		var errors []string
 
 		for _, f := range cacheFindings {
-			ageEligible, ageErr := recheckAgeEligibility(f, filters, time.Now())
-			if ageErr != nil {
-				errors = append(errors, fmt.Sprintf("skipped %s: cannot verify age eligibility: %v", f.Path, ageErr))
+			var checkSafe func() error
+			if !*flagUnsafeClean {
+				checkSafe = func() error {
+					allowed, reason := safeCachePath(f)
+					if !allowed {
+						return fmt.Errorf("%s", reason)
+					}
+					return nil
+				}
+			}
+			fresh, deleted, deleteErr := removeCacheIfEligible(f, filters, checkSafe, time.Now(), os.RemoveAll)
+			if deleteErr != nil {
+				errors = append(errors, fmt.Sprintf("skipped %s: %v", f.Path, deleteErr))
 				continue
 			}
-			if !ageEligible {
+			if !deleted {
 				errors = append(errors, fmt.Sprintf("skipped %s: age filter no longer passes", f.Path))
 				continue
 			}
-			if !*flagUnsafeClean {
-				allowed, reason := safeCachePath(f)
-				if !allowed {
-					errors = append(errors, fmt.Sprintf("skipped %s: %s", f.Path, reason))
-					continue
-				}
-			}
-			if err := os.RemoveAll(f.Path); err != nil {
-				errors = append(errors, fmt.Sprintf("%s: %v", f.Path, err))
-				continue
-			}
 			deletedCount++
+			freedBytes += fresh.SizeBytes
 		}
 
-		// Re-scan to verify
-		fmt.Println("Re-scanning after cleanup...")
-		afterFindings := scanDirectory(scanPath, maxDepth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns, filters)
-		afterTotal := totalCacheBytes(afterFindings)
-		freed := bytesFreed(beforeTotal, afterTotal)
 		fmt.Printf("\nDeleted %d directories", deletedCount)
-		if freed > 0 {
-			fmt.Printf(", freed %s", human(freed))
+		if freedBytes > 0 {
+			fmt.Printf(", freed %s", human(freedBytes))
 		}
 		fmt.Println()
 
