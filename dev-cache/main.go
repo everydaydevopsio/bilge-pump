@@ -204,7 +204,7 @@ func expandFilterPatterns(patterns []string) ([]string, error) {
 }
 
 func compilePathPattern(pattern string) (compiledPathPattern, bool) {
-	pattern = filepath.Clean(strings.TrimSpace(pattern))
+	pattern = strings.TrimSpace(pattern)
 	if pattern == "" {
 		return compiledPathPattern{}, false
 	}
@@ -214,6 +214,8 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 	}
 	if homePrefix {
 		pattern = pattern[2:]
+	} else {
+		pattern = filepath.Clean(pattern)
 	}
 	parts := splitPathParts(pattern)
 	globIndex := -1
@@ -576,7 +578,7 @@ func passesAgeFilter(f Finding, filters ScanFilters) bool {
 	return true
 }
 
-func recheckAgeEligibility(f Finding, filters ScanFilters, now time.Time) (Finding, bool, error) {
+func recheckAgeEligibility(f Finding, filters ScanFilters, now func() time.Time) (Finding, bool, error) {
 	if filters.MinAge <= 0 && filters.MaxAge <= 0 {
 		return f, true, nil
 	}
@@ -588,11 +590,11 @@ func recheckAgeEligibility(f Finding, filters ScanFilters, now time.Time) (Findi
 		return fresh, false, fmt.Errorf("incomplete cache inspection: %s", fresh.Err)
 	}
 	fresh.Pattern = f.Pattern
-	filters.Now = now
+	filters.Now = now()
 	return fresh, passesAgeFilter(fresh, filters), nil
 }
 
-func removeCacheIfEligible(f Finding, filters ScanFilters, checkSafe func() error, now time.Time, remove func(string) error) (Finding, bool, error) {
+func removeCacheIfEligible(f Finding, filters ScanFilters, checkSafe func() error, now func() time.Time, remove func(string) error) (Finding, bool, error) {
 	if checkSafe != nil {
 		if err := checkSafe(); err != nil {
 			return f, false, err
@@ -1023,7 +1025,7 @@ func main() {
 					return nil
 				}
 			}
-			fresh, deleted, deleteErr := removeCacheIfEligible(f, filters, checkSafe, time.Now(), os.RemoveAll)
+			fresh, deleted, deleteErr := removeCacheIfEligible(f, filters, checkSafe, time.Now, os.RemoveAll)
 			if deleteErr != nil {
 				cleanupErrors = append(cleanupErrors, fmt.Sprintf("skipped %s: %v", f.Path, deleteErr))
 				continue

@@ -978,6 +978,29 @@ func TestHomeFilterPrefixIsLiteral(t *testing.T) {
 	if len(findings) != 1 || findings[0].Path != cache {
 		t.Fatalf("home-prefixed inclusion did not select project cache: %+v", findings)
 	}
+
+	parentProject := filepath.Join(filepath.Dir(homeDir), "shared", "project")
+	parentCache := filepath.Join(parentProject, "node_modules")
+	if err := os.MkdirAll(parentCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentCache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parentFilter := "~" + string(filepath.Separator) + ".." + string(filepath.Separator) + "shared" + string(filepath.Separator) + "project"
+	parentRoot := filepath.Dir(homeDir)
+	filters = ScanFilters{ExcludePaths: expandAndCleanPatterns([]string{parentFilter})}
+	findings = scanDirectory(parentRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	for _, finding := range findings {
+		if finding.Path == parentCache {
+			t.Fatalf("home-parent exclusion failed outside home: %+v", findings)
+		}
+	}
+	filters = ScanFilters{IncludeOnly: expandAndCleanPatterns([]string{parentFilter})}
+	findings = scanDirectory(parentRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	if len(findings) != 1 || findings[0].Path != parentCache {
+		t.Fatalf("home-parent inclusion failed outside home: %+v", findings)
+	}
 }
 
 func TestEscapedUnixPathComponentsMatch(t *testing.T) {
@@ -1320,7 +1343,7 @@ func TestRecheckAgeEligibilityRejectsCacheRefreshedAfterScan(t *testing.T) {
 		}
 		return os.Chtimes(file, refreshed, refreshed)
 	}
-	fresh, deleted, err := removeCacheIfEligible(finding, filters, checkSafe, time.Now(), os.RemoveAll)
+	fresh, deleted, err := removeCacheIfEligible(finding, filters, checkSafe, time.Now, os.RemoveAll)
 	if err != nil {
 		t.Fatalf("removeCacheIfEligible: %v", err)
 	}
@@ -1339,6 +1362,46 @@ func TestRecheckAgeEligibilityRejectsCacheRefreshedAfterScan(t *testing.T) {
 	}
 	if _, err := os.Stat(cache); err != nil {
 		t.Fatalf("refreshed cache was removed: %v", err)
+	}
+}
+
+func TestRemoveCacheUsesClockAfterSafetyCheck(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(cache, "cache.dat")
+	if err := os.WriteFile(file, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scanTime := time.Now()
+	modTime := scanTime.Add(-23 * time.Hour)
+	if err := os.Chtimes(file, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+	finding, err := inspectPath(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding.Pattern = "node_modules"
+	filters := ScanFilters{Now: scanTime, MaxAge: 24 * time.Hour}
+	if !passesAgeFilter(finding, filters) {
+		t.Fatal("fixture should pass the maximum age filter at scan time")
+	}
+	clockNow := scanTime
+	checkSafe := func() error {
+		clockNow = scanTime.Add(2 * time.Hour)
+		return nil
+	}
+	_, deleted, err := removeCacheIfEligible(finding, filters, checkSafe, func() time.Time { return clockNow }, os.RemoveAll)
+	if err != nil {
+		t.Fatalf("removeCacheIfEligible: %v", err)
+	}
+	if deleted {
+		t.Fatal("cache crossing max-age during safety checks was deleted")
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("cache crossing max-age was removed: %v", err)
 	}
 }
 
