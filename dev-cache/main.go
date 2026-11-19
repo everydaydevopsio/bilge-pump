@@ -217,6 +217,14 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 		if runtime.GOOS == "windows" {
 			pattern = strings.ReplaceAll(pattern, "/", `\`)
 		}
+		parts := strings.Split(pattern, string(filepath.Separator))
+		normalized := parts[:0]
+		for _, part := range parts {
+			if part != "" && part != "." {
+				normalized = append(normalized, part)
+			}
+		}
+		pattern = strings.Join(normalized, string(filepath.Separator))
 	} else {
 		pattern = filepath.Clean(pattern)
 	}

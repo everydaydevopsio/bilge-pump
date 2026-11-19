@@ -1085,6 +1085,34 @@ func TestWindowsHomeGlobSeparators(t *testing.T) {
 	}
 }
 
+func TestHomeGlobNormalizesDotAndRepeatedSeparators(t *testing.T) {
+	homeDir := filepath.Join(t.TempDir(), "user[1]")
+	project := filepath.Join(homeDir, "src", "team-alpha", "project")
+	cache := filepath.Join(project, "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	patterns := []string{"~/src/*/./project", "~/src//*/project"}
+	for _, pattern := range patterns {
+		t.Run(pattern, func(t *testing.T) {
+			findings := scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+				IncludeOnly: []string{pattern},
+			})
+			if len(findings) != 1 || findings[0].Path != cache {
+				t.Fatalf("home include %q got %+v, want %s", pattern, findings, cache)
+			}
+			findings = scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+				ExcludePaths: []string{pattern},
+			})
+			if len(findings) != 0 {
+				t.Fatalf("home exclusion %q got %+v, want no findings", pattern, findings)
+			}
+		})
+	}
+}
+
 func TestEscapedUnixPathComponentsMatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix filepath.Match escape semantics")
