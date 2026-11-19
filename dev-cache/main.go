@@ -106,6 +106,7 @@ type ScanFilters struct {
 	MinAge       time.Duration
 	MaxAge       time.Duration
 	Now          time.Time
+	Warn         func(string)
 }
 
 type compiledPathPattern struct {
@@ -218,9 +219,18 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 			pattern = strings.ReplaceAll(pattern, "/", `\`)
 		}
 		parts := strings.Split(pattern, string(filepath.Separator))
-		normalized := parts[:0]
+		normalized := make([]string, 0, len(parts))
 		for _, part := range parts {
-			if part != "" && part != "." {
+			switch part {
+			case "", ".":
+				continue
+			case "..":
+				if n := len(normalized); n > 0 && normalized[n-1] != ".." {
+					normalized = normalized[:n-1]
+				} else {
+					normalized = append(normalized, part)
+				}
+			default:
 				normalized = append(normalized, part)
 			}
 		}
@@ -961,6 +971,9 @@ func main() {
 	if h, _ := os.Hostname(); h != "" {
 		rep.Hostname = h
 	}
+	filters.Warn = func(message string) {
+		rep.Warnings = append(rep.Warnings, message)
+	}
 
 	// Scan for cache directories
 	progress := os.Stdout
@@ -1260,6 +1273,10 @@ func detectLanguage(dirPath string, langSignatures map[string][]string, langPrio
 
 // scanDirectory walks through the directory tree up to maxDepth and matches directory names against patterns
 func scanDirectory(root string, maxDepth int, patterns []string, patternToLang map[string]string, detectLang bool, langSignatures map[string][]string, langPriorities map[string]int, langToPatterns map[string][]string, filters ScanFilters) []Finding {
+	return scanDirectoryWithInspect(root, maxDepth, patterns, patternToLang, detectLang, langSignatures, langPriorities, langToPatterns, filters, inspectPath)
+}
+
+func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patternToLang map[string]string, detectLang bool, langSignatures map[string][]string, langPriorities map[string]int, langToPatterns map[string][]string, filters ScanFilters, inspect func(string) (Finding, error)) []Finding {
 	var findings []Finding
 	excludePathPatterns := compilePathPatterns(filters.ExcludePaths)
 	includePathPatterns := compilePathPatterns(filters.IncludeOnly)
@@ -1524,7 +1541,7 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 					break
 				}
 				// Found a match - calculate size
-				f, err := inspectPath(path)
+				f, err := inspect(path)
 				if err != nil {
 					f.Err = err.Error()
 				}
@@ -1542,6 +1559,9 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 				} else {
 					// If no language detection, use parent directory as project root
 					f.ProjectRoot = filepath.Dir(cleanPath)
+				}
+				if (filters.MinAge > 0 || filters.MaxAge > 0) && f.Err != "" && filters.Warn != nil {
+					filters.Warn(fmt.Sprintf("cache inspection incomplete for %s: %s", f.Path, f.Err))
 				}
 				if !passesAgeFilter(f, filters) {
 					// Don't traverse a cache directory that the age filter excludes.

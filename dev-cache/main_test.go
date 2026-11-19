@@ -1111,6 +1111,52 @@ func TestHomeGlobNormalizesDotAndRepeatedSeparators(t *testing.T) {
 			}
 		})
 	}
+	archiveCache := filepath.Join(homeDir, "src", "archive", "node_modules")
+	if err := os.MkdirAll(archiveCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentTraversal := "~/src/*/../archive"
+	findings := scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{parentTraversal},
+	})
+	if len(findings) != 1 || findings[0].Path != archiveCache {
+		t.Fatalf("home include %q got %+v, want %s", parentTraversal, findings, archiveCache)
+	}
+	findings = scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{parentTraversal},
+	})
+	for _, finding := range findings {
+		if finding.Path == archiveCache {
+			t.Fatalf("home exclusion %q did not protect %s: %+v", parentTraversal, archiveCache, findings)
+		}
+	}
+}
+
+func TestAgeFilterReportsIncompleteInspectionWarning(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "project", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var warnings []string
+	inspectWithError := func(path string) (Finding, error) {
+		finding, err := inspectPath(path)
+		finding.Err = "permission denied"
+		return finding, err
+	}
+	findings := scanDirectoryWithInspect(root, 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		MinAge: 24 * time.Hour,
+		Warn:   func(message string) { warnings = append(warnings, message) },
+	}, inspectWithError)
+	if len(findings) != 0 {
+		t.Fatalf("incompletely inspected cache passed the age filter: %+v", findings)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], cache) || !strings.Contains(warnings[0], "permission denied") {
+		t.Fatalf("age-filter inspection warnings = %v, want cache path and inspection error", warnings)
+	}
 }
 
 func TestEscapedUnixPathComponentsMatch(t *testing.T) {
