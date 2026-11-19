@@ -132,7 +132,7 @@ git-cleaner --scan ~/src             # find and report .git sizes
 git-cleaner --scan ~/src --clean     # optimize with git gc
 ```
 
-Project-cache deletion skips paths that are not Git-ignored or contain tracked files. `dev-cache --unsafe-clean` explicitly bypasses that check.
+Project-cache deletion skips paths that are not Git-ignored or contain tracked files. `dev-cache --unsafe-clean` explicitly bypasses that check. The unified command forwards `--exclude`, `--include-only`, `--min-age`, and `--max-age` when `dev-cache` is selected, for example `bilge dev-cache --include-only ~/src/project --min-age 30d` or `bilge clean dev-cache --exclude ~/src/archive`.
 
 ## Troubleshooting
 

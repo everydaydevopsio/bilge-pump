@@ -1,13 +1,28 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+func expandAndCleanPatterns(patterns []string) []string {
+	expanded, err := expandFilterPatterns(patterns)
+	if err != nil {
+		panic(err)
+	}
+	return expanded
+}
 
 func TestSafeCachePathFindsNestedRepositoryFromCachePath(t *testing.T) {
 	team := filepath.Join(t.TempDir(), "team")
@@ -142,7 +157,15 @@ func TestExpandHome(t *testing.T) {
 
 func TestDefaultConfigPath(t *testing.T) {
 	p := defaultConfigPath()
-	expectedSuffix := filepath.Join(".config", "dev-cache", "config.yaml")
+	configDir := ".config"
+	if runtime.GOOS == "windows" {
+		var err error
+		configDir, err = os.UserConfigDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	expectedSuffix := filepath.Join(configDir, "dev-cache", "config.yaml")
 	if !strings.HasSuffix(p, expectedSuffix) {
 		t.Fatalf("defaultConfigPath() unexpected: %q", p)
 	}
@@ -241,13 +264,13 @@ func TestScanDirectory(t *testing.T) {
 	}
 
 	// Test with maxDepth 1
-	findings := scanDirectory(root, 1, patterns, patternToLang, false, nil, nil, nil)
+	findings := scanDirectory(root, 1, patterns, patternToLang, false, nil, nil, nil, ScanFilters{})
 	if len(findings) != 2 {
 		t.Fatalf("expected 2 findings with maxDepth=1, got %d", len(findings))
 	}
 
 	// Test with maxDepth 2
-	findings2 := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil)
+	findings2 := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{})
 	if len(findings2) != 3 {
 		t.Fatalf("expected 3 findings with maxDepth=2, got %d", len(findings2))
 	}
@@ -333,7 +356,7 @@ func TestScanDirectoryMapLookup(t *testing.T) {
 	// 2. proj1 - "no language found" report (no signature, no cache)
 	// 3. proj2 - node language report (has signature)
 	// 4. proj2/node_modules - cache directory finding (depth 1)
-	findings := scanDirectory(root, 1, patterns, patternToLang, true, langSignatures, langPriorities, langToPatterns)
+	findings := scanDirectory(root, 1, patterns, patternToLang, true, langSignatures, langPriorities, langToPatterns, ScanFilters{})
 
 	// Count findings by type
 	var cacheFindings int
@@ -701,6 +724,1147 @@ func TestHumanLarge(t *testing.T) {
 	}
 }
 
+func TestParseAgeDuration(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"30d", 30 * 24 * time.Hour, false},
+		{"2w", 14 * 24 * time.Hour, false},
+		{"48h", 48 * time.Hour, false},
+		{"90m", 90 * time.Minute, false},
+		{"", 0, false},
+		{"0d", 0, true},
+		{"-1d", 0, true},
+		{"7x", 0, true},
+		{"1.5d", 0, true},
+		{"1h30m", 0, true},
+		{"9223372036854775807d", 0, true},
+	}
+	for _, tt := range tests {
+		got, err := parseAgeDuration(tt.in)
+		if tt.wantErr && err == nil {
+			t.Fatalf("parseAgeDuration(%q) expected error", tt.in)
+		}
+		if !tt.wantErr {
+			if err != nil {
+				t.Fatalf("parseAgeDuration(%q) unexpected error: %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseAgeDuration(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		}
+	}
+}
+
+func TestScanDirectoryPathFilters(t *testing.T) {
+	root := t.TempDir()
+	includeProj := filepath.Join(root, "include-me")
+	excludeProj := filepath.Join(root, "exclude-me")
+	if err := os.MkdirAll(filepath.Join(includeProj, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(excludeProj, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(includeProj, "node_modules", "a.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(excludeProj, "node_modules", "b.txt"), []byte("skip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	patterns := []string{"node_modules"}
+	patternToLang := map[string]string{"node_modules": "node"}
+	filters := ScanFilters{
+		IncludeOnly:  []string{includeProj},
+		ExcludePaths: []string{excludeProj},
+	}
+	findings := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil, filters)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	if !strings.Contains(findings[0].Path, "include-me") {
+		t.Fatalf("unexpected finding path: %s", findings[0].Path)
+	}
+}
+
+func TestIncludeOnlyOverridesExclude(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "included-and-excluded")
+	cache := filepath.Join(project, "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "package.json"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	findings := scanDirectory(root, 2, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly:  []string{project},
+		ExcludePaths: []string{project},
+	})
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("includeOnly should take precedence over excludePaths; findings = %+v", findings)
+	}
+}
+
+func TestPathFiltersResolveRelativeToWorkingDirectoryAndSupportNestedProjects(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	scanRoot, err := filepath.Abs(filepath.Join(".", "src"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := []string{
+		filepath.Join(scanRoot, "team", "project"),
+		filepath.Join(scanRoot, "team", "other"),
+	}
+	for _, project := range projects {
+		cache := filepath.Join(project, "node_modules")
+		if err := os.MkdirAll(cache, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cache, "cache.txt"), []byte("cache"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	patterns := []string{"node_modules"}
+	patternToLang := map[string]string{"node_modules": "node"}
+	filtered := scanDirectory(filepath.Join(".", "src"), 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: expandAndCleanPatterns([]string{"./src/team/project"}),
+	})
+	if len(filtered) != 1 || filtered[0].Path != filepath.Join(projects[1], "node_modules") {
+		t.Fatalf("relative nested exclusion got %+v; want %s", filtered, filepath.Join(projects[1], "node_modules"))
+	}
+
+	included := scanDirectory(filepath.Join(".", "src"), 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: expandAndCleanPatterns([]string{"./src/team/*"}),
+	})
+	if len(included) != 2 {
+		t.Fatalf("nested include glob should reach both projects below its parent, findings = %+v", included)
+	}
+}
+
+func TestValidatePathPatterns(t *testing.T) {
+	if err := validatePathPatterns([]string{"./src/team-*", "./src/project"}); err != nil {
+		t.Fatalf("valid path patterns rejected: %v", err)
+	}
+	if err := validatePathPatterns([]string{"./src/project["}); err == nil {
+		t.Fatal("malformed exclusion glob was accepted")
+	}
+	for _, pattern := range []string{"./src/*/project[", "./src/team-[", "./src/*/project[a-]", "./src/team-*[a-]", "./src/project[/.."} {
+		if err := validatePathPatterns([]string{pattern}); err == nil {
+			t.Errorf("malformed exclusion glob %q was accepted", pattern)
+		}
+	}
+}
+
+func TestBangCharacterClassMatchesLiteralExclamation(t *testing.T) {
+	if err := validatePathPatterns([]string{"./src/project[!]"}); err != nil {
+		t.Fatalf("valid exclamation character class rejected: %v", err)
+	}
+	root := t.TempDir()
+	cache := filepath.Join(root, "project!", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	findings := scanDirectory(root, 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{filepath.Join(root, "project[!]")},
+	})
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("[!] include filter findings = %+v, want %s", findings, cache)
+	}
+}
+
+func TestScanDirectoryExclusionsMatchSymlinkAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink privileges vary on Windows runners")
+	}
+	workspace := t.TempDir()
+	realRoot := filepath.Join(workspace, "src", "projects")
+	cache := filepath.Join(realRoot, "project", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(workspace, "src", "link")
+	if err := os.MkdirAll(filepath.Dir(aliasRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	for _, exclusion := range []string{
+		filepath.Join(realRoot, "project"),
+		filepath.Join(workspace, "src", "l*", "project"),
+	} {
+		findings := scanDirectory(aliasRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+			ExcludePaths: []string{exclusion},
+		})
+		if len(findings) != 0 {
+			t.Fatalf("symlinked scan selected excluded cache for %q: %+v", exclusion, findings)
+		}
+	}
+	includePattern := filepath.Join(workspace, "src", "l*", "project")
+	compiledInclude, ok := compilePathPattern(includePattern)
+	if !ok || !matchesPathPattern(filepath.Join(aliasRoot, "project"), compiledInclude) {
+		t.Fatalf("alias candidate does not match include glob: alias=%q pattern=%+v ok=%v", filepath.Join(aliasRoot, "project"), compiledInclude, ok)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(aliasRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasCandidate := pathWithScanAlias(filepath.Join(resolvedRoot, "project", "node_modules"), resolvedRoot, aliasRoot)
+	if !pathMatchesPatternOrAncestor(aliasCandidate, []compiledPathPattern{compiledInclude}) {
+		t.Fatalf("mapped alias candidate %q did not match glob %+v (root %q)", aliasCandidate, compiledInclude, resolvedRoot)
+	}
+	findings := scanDirectory(aliasRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{includePattern},
+	})
+	if len(findings) != 1 {
+		t.Fatalf("symlink-alias include was dropped by final filtering: %+v", findings)
+	}
+	resolvedCache, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedFinding, err := filepath.EvalSymlinks(findings[0].Path)
+	if err != nil || resolvedFinding != resolvedCache {
+		t.Fatalf("symlink-alias include selected %q, want cache %q (resolve error %v)", findings[0].Path, resolvedCache, err)
+	}
+}
+
+func TestScanDirectoryCanonicalExclusionThroughSymlinkedParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink privileges vary on Windows runners")
+	}
+	workspace := t.TempDir()
+	canonicalProject := filepath.Join(workspace, "src", "real-team", "project")
+	cache := filepath.Join(canonicalProject, "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(workspace, "src", "link")
+	if err := os.Symlink(filepath.Join(workspace, "src", "real-team"), aliasParent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	scanRoot := filepath.Join(aliasParent, "project")
+	canonicalExclusion := filepath.Join(workspace, "src", "real-*", "project")
+	findings := scanDirectory(scanRoot, 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{canonicalExclusion},
+	})
+	if len(findings) != 0 {
+		t.Fatalf("canonical exclusion %q missed symlinked-parent cache: %+v", canonicalExclusion, findings)
+	}
+}
+
+func TestExpandFilterPatternsRejectsUnsetVariables(t *testing.T) {
+	previous, wasSet := os.LookupEnv("BILGE_TEST_FILTER_ROOT")
+	if err := os.Unsetenv("BILGE_TEST_FILTER_ROOT"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("BILGE_TEST_FILTER_ROOT", previous)
+		} else {
+			_ = os.Unsetenv("BILGE_TEST_FILTER_ROOT")
+		}
+	})
+	if _, err := expandFilterPatterns([]string{"$BILGE_TEST_FILTER_ROOT"}); err == nil {
+		t.Fatal("unset environment variable was accepted as an include path")
+	}
+	t.Setenv("BILGE_TEST_FILTER_ROOT", "")
+	if _, err := expandFilterPatterns([]string{"$BILGE_TEST_FILTER_ROOT"}); err == nil {
+		t.Fatal("empty environment expansion was accepted as an include path")
+	}
+}
+
+func TestCompilePathPatternDoesNotExpandEnvironmentValuesTwice(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "tree$tag")
+	t.Setenv("CACHE_ROOT", root)
+	t.Setenv("tag", "")
+	want := filepath.Join(root, "project")
+	normalized := expandAndCleanPatterns([]string{"$CACHE_ROOT/project"})
+	compiled, ok := compilePathPattern(normalized[0])
+	if !ok || compiled.literalPath != want {
+		t.Fatalf("compiled filter = %+v, want literal path %q", compiled, want)
+	}
+}
+
+func TestHomeFilterPrefixIsLiteral(t *testing.T) {
+	homeDir := filepath.Join(t.TempDir(), "user[1]")
+	if err := os.MkdirAll(filepath.Join(homeDir, "src", "project", "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	cache := filepath.Join(homeDir, "src", "project", "node_modules")
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	filters := ScanFilters{ExcludePaths: expandAndCleanPatterns([]string{"~/src/project"})}
+	findings := scanDirectory(filepath.Join(homeDir, "src"), 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	if len(findings) != 0 {
+		t.Fatalf("home-prefixed exclusion treated home metacharacters as glob syntax: %+v", findings)
+	}
+
+	filters = ScanFilters{IncludeOnly: expandAndCleanPatterns([]string{"~/src/project"})}
+	findings = scanDirectory(filepath.Join(homeDir, "src"), 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("home-prefixed inclusion did not select project cache: %+v", findings)
+	}
+
+	parentProject := filepath.Join(filepath.Dir(homeDir), "shared", "project")
+	parentCache := filepath.Join(parentProject, "node_modules")
+	if err := os.MkdirAll(parentCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentCache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parentFilter := "~" + string(filepath.Separator) + ".." + string(filepath.Separator) + "shared" + string(filepath.Separator) + "project"
+	parentRoot := filepath.Dir(homeDir)
+	filters = ScanFilters{ExcludePaths: expandAndCleanPatterns([]string{parentFilter})}
+	findings = scanDirectory(parentRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	for _, finding := range findings {
+		if finding.Path == parentCache {
+			t.Fatalf("home-parent exclusion failed outside home: %+v", findings)
+		}
+	}
+	filters = ScanFilters{IncludeOnly: expandAndCleanPatterns([]string{parentFilter})}
+	findings = scanDirectory(parentRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
+	if len(findings) != 1 || findings[0].Path != parentCache {
+		t.Fatalf("home-parent inclusion failed outside home: %+v", findings)
+	}
+}
+
+func TestWindowsHomeGlobSeparators(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows home-glob semantics")
+	}
+	homeDir := filepath.Join(t.TempDir(), "user")
+	project := filepath.Join(homeDir, "src", "team-alpha", "project")
+	cache := filepath.Join(project, "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	pattern := "~/src/team-*/project"
+	findings := scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{pattern},
+	})
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("forward-slash home include got %+v, want %s", findings, cache)
+	}
+	findings = scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{pattern},
+	})
+	if len(findings) != 0 {
+		t.Fatalf("forward-slash home exclusion got %+v, want no findings", findings)
+	}
+}
+
+func TestHomeGlobNormalizesDotAndRepeatedSeparators(t *testing.T) {
+	homeDir := filepath.Join(t.TempDir(), "user[1]")
+	project := filepath.Join(homeDir, "src", "team-alpha", "project")
+	cache := filepath.Join(project, "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	patterns := []string{"~/src/*/./project", "~/src//*/project"}
+	for _, pattern := range patterns {
+		t.Run(pattern, func(t *testing.T) {
+			findings := scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+				IncludeOnly: []string{pattern},
+			})
+			if len(findings) != 1 || findings[0].Path != cache {
+				t.Fatalf("home include %q got %+v, want %s", pattern, findings, cache)
+			}
+			findings = scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+				ExcludePaths: []string{pattern},
+			})
+			if len(findings) != 0 {
+				t.Fatalf("home exclusion %q got %+v, want no findings", pattern, findings)
+			}
+		})
+	}
+	archiveCache := filepath.Join(homeDir, "src", "archive", "node_modules")
+	if err := os.MkdirAll(archiveCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentTraversal := "~/src/*/../archive"
+	findings := scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{parentTraversal},
+	})
+	if len(findings) != 1 || findings[0].Path != archiveCache {
+		t.Fatalf("home include %q got %+v, want %s", parentTraversal, findings, archiveCache)
+	}
+	findings = scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{parentTraversal},
+	})
+	for _, finding := range findings {
+		if finding.Path == archiveCache {
+			t.Fatalf("home exclusion %q did not protect %s: %+v", parentTraversal, archiveCache, findings)
+		}
+	}
+}
+
+func TestAgeFilterReportsIncompleteInspectionWarning(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "project", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var warnings []string
+	inspectWithError := func(path string) (Finding, error) {
+		finding, err := inspectPath(path)
+		finding.Err = "permission denied"
+		return finding, err
+	}
+	findings := scanDirectoryWithInspect(root, 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		MinAge: 24 * time.Hour,
+		Warn:   func(message string) { warnings = append(warnings, message) },
+	}, inspectWithError)
+	if len(findings) != 0 {
+		t.Fatalf("incompletely inspected cache passed the age filter: %+v", findings)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], cache) || !strings.Contains(warnings[0], "permission denied") {
+		t.Fatalf("age-filter inspection warnings = %v, want cache path and inspection error", warnings)
+	}
+}
+
+func TestEscapedUnixPathComponentsMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix filepath.Match escape semantics")
+	}
+	root := t.TempDir()
+	cache := filepath.Join(root, "team blue", "project", "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patterns := []string{"node_modules"}
+	langs := map[string]string{"node_modules": "node"}
+	include := filepath.Join(root, "team\\ blue", "*")
+	findings := scanDirectory(root, 4, patterns, langs, false, nil, nil, nil, ScanFilters{IncludeOnly: []string{include}})
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("escaped include prefix findings = %+v, want %s", findings, cache)
+	}
+
+	escapedLiteral := filepath.Join(root, "release\\]")
+	literalCache := filepath.Join(root, "release]", "node_modules")
+	if err := os.MkdirAll(literalCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	findings = scanDirectory(root, 3, patterns, langs, false, nil, nil, nil, ScanFilters{IncludeOnly: []string{escapedLiteral}})
+	if len(findings) != 1 || findings[0].Path != literalCache {
+		t.Fatalf("escaped literal include findings = %+v, want %s", findings, literalCache)
+	}
+}
+
+func TestIncludeOnlyGlobsWithIntermediateWildcards(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	scanRoot := filepath.Join(".", "src")
+	projects := []string{
+		filepath.Join("src", "team", "project"),
+		filepath.Join("src", "team", "other"),
+		filepath.Join("src", "team-red", "project"),
+	}
+	for _, project := range projects {
+		cache := filepath.Join(project, "node_modules")
+		if err := os.MkdirAll(cache, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cache, "cache.txt"), []byte("cache"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	patterns := []string{"node_modules"}
+	patternToLang := map[string]string{"node_modules": "node"}
+	included := scanDirectory(scanRoot, 4, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: expandAndCleanPatterns([]string{"./src/*/project"}),
+	})
+	if len(included) != 2 {
+		t.Fatalf("intermediate wildcard should include both project roots, findings = %+v", included)
+	}
+
+	prefixed := scanDirectory(scanRoot, 4, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: expandAndCleanPatterns([]string{"./src/team-*/project"}),
+	})
+	if len(prefixed) != 1 || !strings.Contains(prefixed[0].Path, filepath.Join("team-red", "project", "node_modules")) {
+		t.Fatalf("wildcard prefix in an intermediate component should include team-red only, findings = %+v", prefixed)
+	}
+}
+
+func TestRelativePathFiltersTreatWorkingDirectoryGlobCharactersLiterally(t *testing.T) {
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(t.TempDir(), "workspace[1]")
+	if err := os.MkdirAll(filepath.Join(workDir, "project", "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "project", "node_modules", "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	patterns := []string{"node_modules"}
+	patternToLang := map[string]string{"node_modules": "node"}
+	excluded := scanDirectory(".", 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: expandAndCleanPatterns([]string{"./project"}),
+	})
+	if len(excluded) != 0 {
+		t.Fatalf("relative exclusion under glob-character working directory got %+v, want no findings", excluded)
+	}
+
+	included := scanDirectory(".", 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: expandAndCleanPatterns([]string{"./project"}),
+	})
+	if len(included) != 1 || filepath.Base(included[0].Path) != "node_modules" {
+		t.Fatalf("relative include under glob-character working directory got %+v, want project cache", included)
+	}
+}
+
+func TestWindowsPathFiltersIgnoreCaseForLiteralAndAncestorMatching(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows path casing semantics")
+	}
+	root := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	cache := filepath.Join(root, "Project", "node_modules")
+	compiled, ok := compilePathPattern(filepath.Join(root, "project"))
+	if !ok {
+		t.Fatal("failed to compile Windows literal path")
+	}
+	within, rel := pathIsWithin(cache, compiled.literalPath)
+	if !within {
+		t.Fatalf("case-insensitive containment failed: path=%q base=%q rel=%q", cache, compiled.literalPath, rel)
+	}
+	if err := os.MkdirAll(filepath.Join(cache, "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	patterns := []string{"node_modules"}
+	patternToLang := map[string]string{"node_modules": "node"}
+	excluded := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{filepath.Join(root, "project")},
+	})
+	if len(excluded) != 0 {
+		t.Fatalf("case-insensitive exclusion got %+v, want no findings", excluded)
+	}
+	rootedProject := strings.TrimPrefix(filepath.Join(root, "Project"), filepath.VolumeName(root))
+	rootedCompiled, ok := compilePathPattern(rootedProject)
+	wantRootedProject := filepath.VolumeName(root) + rootedProject
+	if !ok || rootedCompiled.literalPath != filepath.Clean(wantRootedProject) {
+		t.Fatalf("drive-rooted filter compiled to %q, want %q", rootedCompiled.literalPath, wantRootedProject)
+	}
+	rootedExcluded := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{rootedProject},
+	})
+	if len(rootedExcluded) != 0 {
+		t.Fatalf("drive-rooted exclusion got %+v, want no findings", rootedExcluded)
+	}
+
+	excludedDescendant := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{filepath.Join(root, "project", "node_modules", "keep")},
+	})
+	if len(excludedDescendant) != 0 {
+		t.Fatalf("case-insensitive excluded descendant got %+v, want parent cache omitted", excludedDescendant)
+	}
+
+	included := scanDirectory(root, 3, patterns, patternToLang, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{filepath.Join(root, "project")},
+	})
+	if len(included) != 1 || filepath.Base(included[0].Path) != "node_modules" {
+		t.Fatalf("case-insensitive inclusion got %+v, want project cache", included)
+	}
+}
+
+func TestIncludeOnlyTraversesThroughCacheNamedAncestor(t *testing.T) {
+	root := t.TempDir()
+	projectCache := filepath.Join(root, "src", "build", "project", "node_modules")
+	if err := os.MkdirAll(projectCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectCache, "package.json"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	findings := scanDirectory(root, 4, []string{"build", "node_modules"}, map[string]string{
+		"build":        "",
+		"node_modules": "node",
+	}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{filepath.Join(root, "src", "build", "project")},
+	})
+	if len(findings) != 1 || findings[0].Path != projectCache {
+		t.Fatalf("include-only scan beneath cache-named ancestor = %+v, want only %s", findings, projectCache)
+	}
+}
+
+func TestExcludeDescendantPreventsSelectingParentCache(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "project", "node_modules")
+	excluded := filepath.Join(cache, "keep")
+	if err := os.MkdirAll(filepath.Join(excluded, "nested-cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(excluded, "nested-cache", "cache.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "remove.txt"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	findings := scanDirectory(root, 4, []string{"node_modules", "nested-cache"}, map[string]string{}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{excluded},
+	})
+	if len(findings) != 0 {
+		t.Fatalf("cache containing an excluded descendant must not be selected for deletion, findings = %+v", findings)
+	}
+}
+
+func TestPassesAgeFilter(t *testing.T) {
+	now := time.Now()
+	base := Finding{
+		Path:      "/tmp/x",
+		Pattern:   "node_modules",
+		SizeBytes: 10,
+		ModMax:    now.Add(-48 * time.Hour),
+	}
+	filters := ScanFilters{Now: now, MinAge: 24 * time.Hour, MaxAge: 72 * time.Hour}
+	if !passesAgeFilter(base, filters) {
+		t.Fatal("expected finding to pass age filters")
+	}
+	tooNew := base
+	tooNew.ModMax = now.Add(-2 * time.Hour)
+	if passesAgeFilter(tooNew, filters) {
+		t.Fatal("expected too-new finding to fail min-age filter")
+	}
+	tooOld := base
+	tooOld.ModMax = now.Add(-10 * 24 * time.Hour)
+	if passesAgeFilter(tooOld, filters) {
+		t.Fatal("expected too-old finding to fail max-age filter")
+	}
+}
+
+func TestPassesAgeFilterRejectsUnknownModificationTime(t *testing.T) {
+	finding := Finding{Path: "/tmp/cache", Pattern: "node_modules"}
+	filters := ScanFilters{Now: time.Now(), MinAge: 24 * time.Hour}
+	if passesAgeFilter(finding, filters) {
+		t.Fatal("expected unknown modification time to fail a configured age filter")
+	}
+
+	filters.MinAge = 0
+	filters.MaxAge = 24 * time.Hour
+	if passesAgeFilter(finding, filters) {
+		t.Fatal("expected unknown modification time to fail a configured max-age filter")
+	}
+}
+
+type failingInfoDirEntry struct{ fs.DirEntry }
+
+func (failingInfoDirEntry) Info() (fs.FileInfo, error) {
+	return nil, errors.New("permission denied")
+}
+
+func TestPassesAgeFilterRejectsPartialInspection(t *testing.T) {
+	cache := t.TempDir()
+	oldFile := filepath.Join(cache, "old-readable.txt")
+	newFile := filepath.Join(cache, "new-unreadable.txt")
+	for _, path := range []string{oldFile, newFile} {
+		if err := os.WriteFile(path, []byte("cache"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(oldFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	walkWithUnreadableFile := func(root string, fn fs.WalkDirFunc) error {
+		return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err == nil && path == newFile {
+				entry = failingInfoDirEntry{DirEntry: entry}
+			}
+			return fn(path, entry, err)
+		})
+	}
+	finding, err := inspectPathWithWalk(cache, walkWithUnreadableFile)
+	if err != nil {
+		t.Fatalf("inspectPathWithWalk: %v", err)
+	}
+	if finding.Err == "" || !finding.ModMax.Equal(old) {
+		t.Fatalf("partial inspection finding = %+v, want recorded error and readable file timestamp", finding)
+	}
+	finding.Pattern = "node_modules"
+	if passesAgeFilter(finding, ScanFilters{Now: now, MinAge: 24 * time.Hour}) {
+		t.Fatal("age filter accepted a partial inspection with an old readable file")
+	}
+}
+
+func TestRecheckAgeEligibilityRejectsCacheRefreshedAfterScan(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(cache, "cache.dat")
+	if err := os.WriteFile(file, []byte("old cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	finding, err := inspectPath(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding.Pattern = "node_modules"
+	filters := ScanFilters{Now: now, MinAge: 24 * time.Hour}
+	if !passesAgeFilter(finding, filters) {
+		t.Fatal("fixture should pass the initial scan age filter")
+	}
+
+	checkSafe := func() error {
+		refreshed := time.Now()
+		if err := os.WriteFile(file, []byte("refreshed cache with more data"), 0o644); err != nil {
+			return err
+		}
+		return os.Chtimes(file, refreshed, refreshed)
+	}
+	fresh, deleted, attempted, err := removeCacheIfEligible(finding, filters, checkSafe, time.Now, os.RemoveAll)
+	if err != nil {
+		t.Fatalf("removeCacheIfEligible: %v", err)
+	}
+	if deleted || attempted {
+		t.Fatal("refreshed cache remained eligible for cleanup")
+	}
+	if fresh.SizeBytes <= finding.SizeBytes {
+		t.Fatalf("fresh finding size = %d, want updated size above %d", fresh.SizeBytes, finding.SizeBytes)
+	}
+	var freedBytes int64
+	if deleted {
+		freedBytes += fresh.SizeBytes
+	}
+	if freedBytes != 0 {
+		t.Fatal("preserved refreshed cache was reported as freed")
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("refreshed cache was removed: %v", err)
+	}
+}
+
+func TestRemoveCacheUsesClockAfterSafetyCheck(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(cache, "cache.dat")
+	if err := os.WriteFile(file, []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scanTime := time.Now()
+	modTime := scanTime.Add(-23 * time.Hour)
+	if err := os.Chtimes(file, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+	finding, err := inspectPath(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding.Pattern = "node_modules"
+	filters := ScanFilters{Now: scanTime, MaxAge: 24 * time.Hour}
+	if !passesAgeFilter(finding, filters) {
+		t.Fatal("fixture should pass the maximum age filter at scan time")
+	}
+	clockNow := scanTime
+	checkSafe := func() error {
+		clockNow = scanTime.Add(2 * time.Hour)
+		return nil
+	}
+	_, deleted, attempted, err := removeCacheIfEligible(finding, filters, checkSafe, func() time.Time { return clockNow }, os.RemoveAll)
+	if err != nil {
+		t.Fatalf("removeCacheIfEligible: %v", err)
+	}
+	if deleted || attempted {
+		t.Fatal("cache crossing max-age during safety checks was deleted")
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("cache crossing max-age was removed: %v", err)
+	}
+}
+
+func TestPartialCleanupMeasuresFreedBytesWithoutSelectionFilter(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(cache, "first.dat")
+	second := filepath.Join(cache, "second.dat")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("cache-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finding, err := inspectPath(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding.Pattern = "node_modules"
+	deletedFileSize := int64(len("cache-bytes"))
+	remove := func(string) error {
+		if err := os.Remove(first); err != nil {
+			return err
+		}
+		return errors.New("simulated locked file")
+	}
+	fresh, deleted, attempted, err := removeCacheIfEligible(finding, ScanFilters{}, nil, time.Now, remove)
+	if err == nil || deleted || !attempted {
+		t.Fatalf("partial remove result = finding:%+v deleted:%v attempted:%v err:%v", fresh, deleted, attempted, err)
+	}
+	freed, err := measureFreedBytes(fresh)
+	if err != nil {
+		t.Fatalf("measureFreedBytes: %v", err)
+	}
+	if freed != deletedFileSize {
+		t.Fatalf("measured freed bytes = %d, want %d", freed, deletedFileSize)
+	}
+	if _, err := os.Stat(second); err != nil {
+		t.Fatalf("partial deletion removed remaining file: %v", err)
+	}
+}
+
+func TestWindowsCleanupReportsPartialDeletionWhenFileIsLocked(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("requires Windows file locking behavior")
+	}
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	cache := filepath.Join(repo, "project", "node_modules")
+	if err := os.MkdirAll(filepath.Join(cache, "z-locked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deletedFile := filepath.Join(cache, "a-deleted.dat")
+	lockedFile := filepath.Join(cache, "z-locked", "locked.dat")
+	if err := os.WriteFile(deletedFile, []byte("remove"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockedFile, []byte("locked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(cache), "package.json"), []byte(`{"name":"fixture"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{
+		Version:   1,
+		Options:   Options{DefaultScanPath: repo, MaxDepth: 3, DetectLanguage: true},
+		Languages: []Language{{Name: "node", Enabled: true, Patterns: []string{"node_modules"}, Signatures: []string{"package.json"}}},
+	}
+	configBytes, err := yaml.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "dev-cache.yaml")
+	if err := os.WriteFile(configPath, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "dev-cache.exe")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build dev-cache: %v: %s", err, output)
+	}
+	lockScript := filepath.Join(t.TempDir(), "lock-file.ps1")
+	script := `param([string]$path)
+$stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+[Console]::Out.WriteLine('locked')
+[Console]::Out.Flush()
+[Console]::In.ReadLine() | Out-Null
+$stream.Dispose()
+`
+	if err := os.WriteFile(lockScript, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locker := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", lockScript, lockedFile)
+	stdout, err := locker.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := locker.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lockerStderr bytes.Buffer
+	locker.Stderr = &lockerStderr
+	if err := locker.Start(); err != nil {
+		t.Fatalf("start locked-file helper: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = stdin.Write([]byte("release\n"))
+		_ = stdin.Close()
+		_ = locker.Wait()
+	})
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || strings.TrimSpace(ready) != "locked" {
+		t.Fatalf("locked-file helper did not acquire lock: %q: %v: %s", ready, err, lockerStderr.String())
+	}
+	command := exec.Command(binary, "--config", configPath, "--clean", "--yes", "--unsafe-clean")
+	output, err := command.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+		t.Fatalf("partial cleanup exit = %v, want 3; output: %s", err, output)
+	}
+	if !bytes.Contains(output, []byte("deletion incomplete")) || !bytes.Contains(output, []byte("freed 6 B")) {
+		t.Fatalf("partial cleanup output did not report failure and freed bytes: %s", output)
+	}
+	if _, err := os.Stat(deletedFile); !os.IsNotExist(err) {
+		t.Fatalf("unlocked file remained after partial cleanup: %v", err)
+	}
+	if _, err := os.Stat(lockedFile); err != nil {
+		t.Fatalf("locked file was removed or inaccessible after cleanup: %v", err)
+	}
+}
+
+func TestCleanupCLIUsesYAMLFiltersAndCLIOverrides(t *testing.T) {
+	repo := t.TempDir()
+	gitignore := filepath.Join(repo, ".gitignore")
+	if err := os.WriteFile(gitignore, []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+
+	now := time.Now()
+	excludedCache := filepath.Join(repo, "team", "excluded", "node_modules")
+	tooNewCache := filepath.Join(repo, "team", "too-new", "node_modules")
+	eligibleCache := filepath.Join(repo, "team", "eligible", "node_modules")
+	trackedCache := filepath.Join(repo, "team", "tracked", "node_modules")
+	for _, cache := range []string{excludedCache, tooNewCache, eligibleCache, trackedCache} {
+		if err := os.MkdirAll(cache, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		projectRoot := filepath.Dir(cache)
+		if err := os.WriteFile(filepath.Join(projectRoot, "package.json"), []byte(`{"name":"fixture"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trackedFile := filepath.Join(trackedCache, "tracked.dat")
+	if err := os.WriteFile(trackedFile, []byte("tracked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	relTracked, err := filepath.Rel(repo, trackedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repo, "add", "-f", filepath.ToSlash(relTracked)).CombinedOutput(); err != nil {
+		t.Fatalf("git add tracked cache file: %v: %s", err, output)
+	}
+	old := now.Add(-60 * 24 * time.Hour)
+	for _, path := range []string{
+		filepath.Join(excludedCache, "cache.dat"),
+		filepath.Join(eligibleCache, "cache.dat"),
+		filepath.Join(trackedCache, "cache.dat"),
+		trackedFile,
+	} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := Config{
+		Version: 1,
+		Options: Options{
+			DefaultScanPath: repo,
+			MaxDepth:        4,
+			DetectLanguage:  true,
+			ExcludePaths:    []string{filepath.Join(repo, "team", "excluded")},
+			MinAge:          "90d",
+		},
+		Languages: []Language{{Name: "node", Enabled: true, Patterns: []string{"node_modules"}, Signatures: []string{"package.json"}}},
+	}
+	configBytes, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "dev-cache.yaml")
+	if err := os.WriteFile(configPath, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	binaryName := "dev-cache"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binary := filepath.Join(t.TempDir(), binaryName)
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build dev-cache: %v: %s", err, output)
+	}
+	command := exec.Command(binary, "--config", configPath, "--clean", "--yes", "--min-age", "30d")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+			t.Fatalf("dev-cache cleanup: %v: %s", err, output)
+		}
+	}
+	if !bytes.Contains(output, []byte("contains Git-tracked files")) {
+		t.Fatalf("cleanup output did not report tracked-cache protection: %s", output)
+	}
+
+	for _, cache := range []string{excludedCache, tooNewCache, trackedCache} {
+		if _, err := os.Stat(cache); err != nil {
+			t.Errorf("protected cache %s should remain: %v", cache, err)
+		}
+	}
+	if _, err := os.Stat(eligibleCache); !os.IsNotExist(err) {
+		t.Errorf("eligible cache %s should be removed, stat error = %v", eligibleCache, err)
+	}
+}
+
+func TestApplyFilterOverridesCanClearConfiguredFilters(t *testing.T) {
+	configured := Options{
+		ExcludePaths: []string{"/src/archive"},
+		IncludeOnly:  []string{"/src/team"},
+		MinAge:       "30d",
+		MaxAge:       "90d",
+	}
+	for _, tt := range []struct {
+		name string
+		key  string
+	}{
+		{name: "exclude", key: "exclude"},
+		{name: "include-only", key: "include-only"},
+		{name: "min-age", key: "min-age"},
+		{name: "max-age", key: "max-age"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyFilterOverrides(configured, map[string]string{tt.key: ""}, map[string]bool{tt.key: true})
+			switch tt.key {
+			case "exclude":
+				if len(got.ExcludePaths) != 0 || len(got.IncludeOnly) != 1 || got.MinAge != "30d" || got.MaxAge != "90d" {
+					t.Fatalf("clearing exclude produced options %+v", got)
+				}
+			case "include-only":
+				if len(got.IncludeOnly) != 0 || len(got.ExcludePaths) != 1 || got.MinAge != "30d" || got.MaxAge != "90d" {
+					t.Fatalf("clearing include-only produced options %+v", got)
+				}
+			case "min-age":
+				if got.MinAge != "" || got.MaxAge != "90d" || len(got.ExcludePaths) != 1 || len(got.IncludeOnly) != 1 {
+					t.Fatalf("clearing min-age produced options %+v", got)
+				}
+			case "max-age":
+				if got.MaxAge != "" || got.MinAge != "30d" || len(got.ExcludePaths) != 1 || len(got.IncludeOnly) != 1 {
+					t.Fatalf("clearing max-age produced options %+v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestScanDirectorySkipsNestedFindingsWhenOuterCacheFailsAgeFilter(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "project", "outer-cache")
+	inner := filepath.Join(outer, "inner-cache")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(inner, "old.txt")
+	if err := os.WriteFile(oldFile, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(oldFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outer, "recent.txt"), []byte("recent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	findings := scanDirectory(root, 3, []string{"outer-cache", "inner-cache"}, map[string]string{}, false, nil, nil, nil, ScanFilters{
+		Now:    time.Now(),
+		MinAge: 24 * time.Hour,
+	})
+	if len(findings) != 0 {
+		t.Fatalf("filtered outer cache should prevent nested findings, got %+v", findings)
+	}
+}
+
 func TestScanDirectoryWithExcludedDir(t *testing.T) {
 	// Test that .git directories are excluded from language detection
 	root := t.TempDir()
@@ -724,7 +1888,7 @@ func TestScanDirectoryWithExcludedDir(t *testing.T) {
 	langPriorities := map[string]int{"node": 10}
 	langToPatterns := map[string][]string{"node": {"node_modules"}}
 
-	findings := scanDirectory(root, 2, patterns, patternToLang, true, langSignatures, langPriorities, langToPatterns)
+	findings := scanDirectory(root, 2, patterns, patternToLang, true, langSignatures, langPriorities, langToPatterns, ScanFilters{})
 	if len(findings) < 1 {
 		t.Fatalf("expected at least 1 finding, got %d", len(findings))
 	}
@@ -784,7 +1948,7 @@ func TestScanDirectoryWalkError(t *testing.T) {
 
 	patterns := []string{"node_modules"}
 	patternToLang := map[string]string{"node_modules": "node"}
-	findings := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil)
+	findings := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{})
 	// Should not panic; may or may not find things depending on walk behavior
 	_ = findings
 }

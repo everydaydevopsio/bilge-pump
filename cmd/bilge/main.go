@@ -372,7 +372,7 @@ func withoutArgs(args []string, remove ...string) []string {
 
 func planTaskArgs(tasks, extra []string, clean bool, scanPath string, yes bool) (map[string][]string, error) {
 	allowed := map[string]map[string]bool{
-		"dev-cache":     {"--depth": true, "--languages": true, "--unsafe-clean": false},
+		"dev-cache":     {"--depth": true, "--languages": true, "--unsafe-clean": false, "--exclude": true, "--include-only": true, "--min-age": true, "--max-age": true},
 		"git-cleaner":   {},
 		"bilge-macos":   {"--targets": true, "--docker-prune": false, "--details": false, "--check-tools": false, "--list-targets": false},
 		"bilge-linux":   {"--targets": true},

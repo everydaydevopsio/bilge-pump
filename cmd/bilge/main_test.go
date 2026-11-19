@@ -46,6 +46,18 @@ func TestPlanTaskArgsRejectsUnsupportedArgumentBeforeLaunching(t *testing.T) {
 	}
 }
 
+func TestPlanTaskArgsForwardsDevCacheFilterFlags(t *testing.T) {
+	extra := []string{"--exclude", "./src/archive", "--include-only=./src/team/project", "--min-age", "30d", "--max-age=90d"}
+	got, err := planTaskArgs([]string{"dev-cache"}, extra, false, "/tmp/src", false)
+	if err != nil {
+		t.Fatalf("planTaskArgs rejected dev-cache filter flags: %v", err)
+	}
+	want := map[string][]string{"dev-cache": append(extra, "--scan", "/tmp/src")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("planTaskArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestParseBooleanFlagHonorsExplicitValue(t *testing.T) {
 	for _, tt := range []struct {
 		name     string

@@ -7,13 +7,16 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/olekukonko/tablewriter"
 	yaml "gopkg.in/yaml.v3"
@@ -37,6 +40,10 @@ var (
 	flagScan        = flag.String("scan", "", "Directory to scan (overrides config default)")
 	flagDepth       = flag.Int("depth", 0, "Max scan depth (0 = use config default, overrides config)")
 	flagLangs       = flag.String("languages", "", "Comma-separated list of languages to scan")
+	flagExclude     = flag.String("exclude", "", "Comma-separated path patterns to exclude from scan")
+	flagInclude     = flag.String("include-only", "", "Comma-separated path patterns to include only")
+	flagMinAge      = flag.String("min-age", "", "Only include caches older than this (e.g. 30d, 48h)")
+	flagMaxAge      = flag.String("max-age", "", "Only include caches no older than this (e.g. 7d, 24h)")
 	flagUnsafeClean = flag.Bool("unsafe-clean", false, "Allow deleting cache paths that are not ignored by Git (unsafe)")
 )
 
@@ -49,9 +56,13 @@ type Config struct {
 }
 
 type Options struct {
-	DefaultScanPath string `yaml:"defaultScanPath"`
-	MaxDepth        int    `yaml:"maxDepth"`
-	DetectLanguage  bool   `yaml:"detectLanguage"` // If true, detect language per directory and search only relevant patterns
+	DefaultScanPath string   `yaml:"defaultScanPath"`
+	MaxDepth        int      `yaml:"maxDepth"`
+	DetectLanguage  bool     `yaml:"detectLanguage"` // If true, detect language per directory and search only relevant patterns
+	ExcludePaths    []string `yaml:"excludePaths"`
+	IncludeOnly     []string `yaml:"includeOnly"`
+	MinAge          string   `yaml:"minAge"`
+	MaxAge          string   `yaml:"maxAge"`
 }
 
 type Language struct {
@@ -89,6 +100,22 @@ type Report struct {
 	Warnings []string  `json:"warnings"`
 }
 
+type ScanFilters struct {
+	ExcludePaths []string
+	IncludeOnly  []string
+	MinAge       time.Duration
+	MaxAge       time.Duration
+	Now          time.Time
+	Warn         func(string)
+}
+
+type compiledPathPattern struct {
+	literalPath  string
+	literalOnly  bool
+	literalBase  string
+	patternParts []string
+}
+
 // ----- Utilities -----
 
 func defaultConfigPath() string {
@@ -109,8 +136,528 @@ func defaultConfigPath() string {
 
 func ensureDir(p string) error { return os.MkdirAll(filepath.Dir(p), 0o755) }
 
-func home() string           { h, _ := os.UserHomeDir(); return h }
-func expand(p string) string { return os.ExpandEnv(strings.ReplaceAll(p, "~", home())) }
+func home() string { h, _ := os.UserHomeDir(); return h }
+func expand(p string) string {
+	p = os.ExpandEnv(p)
+	if p == "~" {
+		return home()
+	}
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
+		return filepath.Join(home(), p[2:])
+	}
+	return p
+}
+
+func splitCSV(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		s := strings.TrimSpace(p)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func applyFilterOverrides(options Options, values map[string]string, explicitlySet map[string]bool) Options {
+	if explicitlySet["exclude"] {
+		options.ExcludePaths = splitCSV(values["exclude"])
+	}
+	if explicitlySet["include-only"] {
+		options.IncludeOnly = splitCSV(values["include-only"])
+	}
+	if explicitlySet["min-age"] {
+		options.MinAge = values["min-age"]
+	}
+	if explicitlySet["max-age"] {
+		options.MaxAge = values["max-age"]
+	}
+	return options
+}
+
+func expandFilterPatterns(patterns []string) ([]string, error) {
+	out := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		var unresolved string
+		expanded := os.Expand(strings.TrimSpace(p), func(key string) string {
+			value, ok := os.LookupEnv(key)
+			if !ok && unresolved == "" {
+				unresolved = key
+			}
+			return value
+		})
+		if unresolved != "" {
+			return nil, fmt.Errorf("environment variable %q is not set", unresolved)
+		}
+		if strings.TrimSpace(expanded) == "" {
+			return nil, fmt.Errorf("path pattern %q expands to an empty value", p)
+		}
+		out = append(out, expanded)
+	}
+	return out, nil
+}
+
+func compilePathPattern(pattern string) (compiledPathPattern, bool) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return compiledPathPattern{}, false
+	}
+	homePrefix := pattern == "~" || strings.HasPrefix(pattern, "~/") || strings.HasPrefix(pattern, "~\\")
+	if pattern == "~" {
+		return compiledPathPattern{literalPath: filepath.Clean(home()), literalOnly: true}, true
+	}
+	if homePrefix {
+		pattern = pattern[2:]
+		if runtime.GOOS == "windows" {
+			pattern = strings.ReplaceAll(pattern, "/", `\`)
+		}
+		parts := strings.Split(pattern, string(filepath.Separator))
+		normalized := make([]string, 0, len(parts))
+		for _, part := range parts {
+			switch part {
+			case "", ".":
+				continue
+			case "..":
+				if n := len(normalized); n > 0 && normalized[n-1] != ".." {
+					normalized = normalized[:n-1]
+				} else {
+					normalized = append(normalized, part)
+				}
+			default:
+				normalized = append(normalized, part)
+			}
+		}
+		pattern = strings.Join(normalized, string(filepath.Separator))
+	} else {
+		pattern = filepath.Clean(pattern)
+	}
+	parts := splitPathParts(pattern)
+	globIndex := -1
+	for i, part := range parts {
+		if strings.ContainsAny(part, "*?[") || (runtime.GOOS != "windows" && strings.Contains(part, "\\")) {
+			globIndex = i
+			break
+		}
+	}
+	if globIndex < 0 {
+		literalPath := pattern
+		if homePrefix {
+			literalPath = filepath.Join(home(), literalPath)
+		} else if !isAbsolutePath(literalPath) && filepath.VolumeName(literalPath) == "" {
+			literalPath = filepath.Join(currentWorkingDirectory(), literalPath)
+		}
+		return compiledPathPattern{literalPath: absolutePath(literalPath), literalOnly: true}, true
+	}
+
+	volume := filepath.VolumeName(pattern)
+	isAbsolute := isAbsolutePath(pattern)
+	literalBase := ""
+	if isAbsolute {
+		literalBase = string(filepath.Separator)
+		if volume != "" {
+			literalBase = volume + string(filepath.Separator)
+		}
+	} else if homePrefix {
+		literalBase = home()
+	} else if volume != "" {
+		literalBase = volume
+	}
+	for _, part := range parts[:globIndex] {
+		literalBase = filepath.Join(literalBase, part)
+	}
+	if !isAbsolute && volume == "" && !homePrefix {
+		literalBase = filepath.Join(currentWorkingDirectory(), literalBase)
+	}
+	literalBase = absolutePath(literalBase)
+	return compiledPathPattern{
+		literalBase:  filepath.Clean(literalBase),
+		patternParts: append([]string(nil), parts[globIndex:]...),
+	}, true
+}
+
+func compilePathPatterns(patterns []string) []compiledPathPattern {
+	compiled := make([]compiledPathPattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		if p, ok := compilePathPattern(pattern); ok {
+			compiled = append(compiled, p)
+		}
+	}
+	return compiled
+}
+
+func currentWorkingDirectory() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
+}
+
+func isAbsolutePath(path string) bool {
+	if runtime.GOOS == "windows" && len(path) > 0 && (path[0] == '\\' || path[0] == '/') {
+		return true
+	}
+	if filepath.IsAbs(path) {
+		return true
+	}
+	if runtime.GOOS == "windows" && len(path) >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+		return (path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')
+	}
+	return false
+}
+
+func absolutePath(path string) string {
+	if runtime.GOOS == "windows" && filepath.VolumeName(path) == "" && len(path) > 0 && (path[0] == '\\' || path[0] == '/') {
+		return filepath.Clean(filepath.VolumeName(currentWorkingDirectory()) + path)
+	}
+	if isAbsolutePath(path) && (runtime.GOOS != "windows" || filepath.VolumeName(path) != "") {
+		return filepath.Clean(path)
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute
+	}
+	return filepath.Clean(path)
+}
+
+func splitPathParts(path string) []string {
+	path = strings.TrimPrefix(path, filepath.VolumeName(path))
+	path = strings.Trim(path, string(filepath.Separator))
+	if path == "" || path == "." {
+		return nil
+	}
+	return strings.Split(path, string(filepath.Separator))
+}
+
+func validatePathPatterns(patterns []string) error {
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		for _, component := range splitPathParts(pattern) {
+			if err := validateGlobComponent(component); err != nil {
+				return fmt.Errorf("invalid path pattern %q: %w", pattern, err)
+			}
+		}
+		if _, err := filepath.Match(pattern, strings.Repeat("x", len(pattern)+1)); err != nil {
+			return fmt.Errorf("invalid path pattern %q: %w", pattern, err)
+		}
+	}
+	return nil
+}
+
+func validateGlobComponent(pattern string) error {
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			if runtime.GOOS == "windows" {
+				continue
+			}
+			i++
+			if i >= len(pattern) {
+				return fmt.Errorf("trailing escape")
+			}
+		case '[':
+			j := i + 1
+			if j < len(pattern) && pattern[j] == '^' {
+				j++
+			}
+			ranges := 0
+			for {
+				if j < len(pattern) && pattern[j] == ']' && ranges > 0 {
+					i = j
+					break
+				}
+				lo, next, err := readGlobClassRune(pattern, j)
+				if err != nil {
+					return err
+				}
+				j = next
+				if j < len(pattern) && pattern[j] == '-' {
+					hi, after, err := readGlobClassRune(pattern, j+1)
+					if err != nil {
+						return err
+					}
+					if hi < lo {
+						return fmt.Errorf("descending character range")
+					}
+					j = after
+				}
+				ranges++
+			}
+		}
+	}
+	return nil
+}
+
+func readGlobClassRune(pattern string, index int) (rune, int, error) {
+	if index >= len(pattern) || pattern[index] == '-' || pattern[index] == ']' {
+		return 0, index, fmt.Errorf("invalid character class")
+	}
+	if pattern[index] == '\\' && runtime.GOOS != "windows" {
+		index++
+		if index >= len(pattern) {
+			return 0, index, fmt.Errorf("trailing escape in character class")
+		}
+	}
+	r, size := utf8.DecodeRuneInString(pattern[index:])
+	if r == utf8.RuneError && size == 1 {
+		return 0, index, fmt.Errorf("invalid UTF-8 in character class")
+	}
+	return r, index + size, nil
+}
+
+func matchesPathComponent(pattern, name string) bool {
+	if runtime.GOOS == "windows" {
+		pattern = strings.ToLower(pattern)
+		name = strings.ToLower(name)
+	}
+	matched, err := filepath.Match(pattern, name)
+	return err == nil && matched
+}
+
+func pathIsWithin(path, base string) (bool, string) {
+	pathAbs := absolutePath(path)
+	baseAbs := absolutePath(base)
+	if within, rel := pathIsWithinAbsolute(pathAbs, baseAbs); within {
+		return true, rel
+	}
+	// Lexical comparison cannot see through a symlink alias. Resolve both
+	// existing paths as a fallback so equivalent scan and filter paths agree.
+	resolvedPath, pathErr := filepath.EvalSymlinks(pathAbs)
+	resolvedBase, baseErr := filepath.EvalSymlinks(baseAbs)
+	if pathErr == nil && baseErr == nil {
+		return pathIsWithinAbsolute(filepath.Clean(resolvedPath), filepath.Clean(resolvedBase))
+	}
+	return false, ""
+}
+
+func pathIsWithinAbsolute(pathAbs, baseAbs string) (bool, string) {
+	if runtime.GOOS == "windows" {
+		// filepath.Rel compares path components using Go's lexical rules, but
+		// Windows filesystems commonly treat component casing as equivalent.
+		// Compare normalized separator paths explicitly so literal, glob, and
+		// ancestor checks all use the same case-insensitive semantics.
+		pathAbs = strings.ToLower(filepath.ToSlash(filepath.Clean(pathAbs)))
+		baseAbs = strings.ToLower(filepath.ToSlash(filepath.Clean(baseAbs)))
+		if pathAbs == baseAbs {
+			return true, "."
+		}
+		prefix := strings.TrimSuffix(baseAbs, "/") + "/"
+		if strings.HasPrefix(pathAbs, prefix) {
+			return true, filepath.FromSlash(strings.TrimPrefix(pathAbs, prefix))
+		}
+		return false, ""
+	}
+	rel, err := filepath.Rel(baseAbs, pathAbs)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, rel
+	}
+	return true, rel
+}
+
+func matchesPathPattern(path string, pattern compiledPathPattern) bool {
+	if pattern.literalOnly {
+		within, _ := pathIsWithin(path, pattern.literalPath)
+		return within
+	}
+	within, rel := pathIsWithin(path, pattern.literalBase)
+	if !within {
+		return false
+	}
+	parts := splitPathParts(rel)
+	if len(parts) != len(pattern.patternParts) {
+		return false
+	}
+	for i, part := range parts {
+		if !matchesPathComponent(pattern.patternParts[i], part) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesAnyPattern(path string, patterns []compiledPathPattern) bool {
+	for _, pattern := range patterns {
+		if matchesPathPattern(path, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathMatchesPatternOrAncestor(path string, patterns []compiledPathPattern) bool {
+	path = filepath.Clean(path)
+	for current := path; ; current = filepath.Dir(current) {
+		if matchesAnyPattern(current, patterns) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+	}
+}
+
+func mayContainPatternMatch(path string, patterns []compiledPathPattern) bool {
+	for _, pattern := range patterns {
+		if pattern.literalOnly {
+			if targetWithin, _ := pathIsWithin(pattern.literalPath, path); targetWithin {
+				return true
+			}
+			continue
+		}
+		if prefixWithin, _ := pathIsWithin(pattern.literalBase, path); prefixWithin {
+			return true
+		}
+		within, rel := pathIsWithin(path, pattern.literalBase)
+		if !within {
+			continue
+		}
+		pathParts := splitPathParts(rel)
+		if len(pathParts) > len(pattern.patternParts) {
+			continue
+		}
+		canMatch := true
+		for i, pathPart := range pathParts {
+			if !matchesPathComponent(pattern.patternParts[i], pathPart) {
+				canMatch = false
+				break
+			}
+		}
+		if canMatch {
+			return true
+		}
+	}
+	return false
+}
+
+func parseAgeDuration(s string) (time.Duration, error) {
+	if strings.TrimSpace(s) == "" {
+		return 0, nil
+	}
+	s = strings.TrimSpace(strings.ToLower(s))
+	unit := s[len(s)-1]
+	num := strings.TrimSpace(s[:len(s)-1])
+	if num == "" {
+		return 0, fmt.Errorf("invalid duration: %q", s)
+	}
+	var mult time.Duration
+	switch unit {
+	case 'm':
+		mult = time.Minute
+	case 'h':
+		mult = time.Hour
+	case 'd':
+		mult = 24 * time.Hour
+	case 'w':
+		mult = 7 * 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("unsupported duration unit in %q (use m/h/d/w)", s)
+	}
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid duration value: %q", s)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("duration must be greater than zero: %q", s)
+	}
+	if n > math.MaxInt64/int64(mult) {
+		return 0, fmt.Errorf("duration overflows time.Duration: %q", s)
+	}
+	return time.Duration(n) * mult, nil
+}
+
+func passesAgeFilter(f Finding, filters ScanFilters) bool {
+	if !isCacheDirectory(f) {
+		return true
+	}
+	if (filters.MinAge > 0 || filters.MaxAge > 0) && f.Err != "" {
+		return false
+	}
+	if f.ModMax.IsZero() {
+		return filters.MinAge <= 0 && filters.MaxAge <= 0
+	}
+	now := filters.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	age := now.Sub(f.ModMax)
+	if filters.MinAge > 0 && age < filters.MinAge {
+		return false
+	}
+	if filters.MaxAge > 0 && age > filters.MaxAge {
+		return false
+	}
+	return true
+}
+
+func recheckAgeEligibility(f Finding, filters ScanFilters, now func() time.Time) (Finding, bool, error) {
+	if filters.MinAge <= 0 && filters.MaxAge <= 0 {
+		return f, true, nil
+	}
+	fresh, err := inspectPath(f.Path)
+	if err != nil {
+		return fresh, false, err
+	}
+	if fresh.Err != "" {
+		return fresh, false, fmt.Errorf("incomplete cache inspection: %s", fresh.Err)
+	}
+	fresh.Pattern = f.Pattern
+	filters.Now = now()
+	return fresh, passesAgeFilter(fresh, filters), nil
+}
+
+func removeCacheIfEligible(f Finding, filters ScanFilters, checkSafe func() error, now func() time.Time, remove func(string) error) (Finding, bool, bool, error) {
+	if checkSafe != nil {
+		if err := checkSafe(); err != nil {
+			return f, false, false, err
+		}
+	}
+	fresh, eligible, err := recheckAgeEligibility(f, filters, now)
+	if err != nil {
+		return fresh, false, false, fmt.Errorf("cannot verify age eligibility: %w", err)
+	}
+	if !eligible {
+		return fresh, false, false, nil
+	}
+	if err := remove(f.Path); err != nil {
+		return fresh, false, true, err
+	}
+	return fresh, true, true, nil
+}
+
+func measureFreedBytes(f Finding) (int64, error) {
+	remaining, err := inspectPath(f.Path)
+	if os.IsNotExist(err) {
+		return f.SizeBytes, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if remaining.Err != "" {
+		return 0, fmt.Errorf("remaining cache inspection is incomplete: %s", remaining.Err)
+	}
+	return bytesFreed(f.SizeBytes, remaining.SizeBytes), nil
+}
+
+func pathWithScanAlias(path, resolvedRoot, filterRoot string) string {
+	if filterRoot == resolvedRoot {
+		return path
+	}
+	rel, err := filepath.Rel(resolvedRoot, path)
+	if err != nil {
+		return path
+	}
+	return filepath.Join(filterRoot, rel)
+}
 
 func checkVersionFlag() bool {
 	for _, arg := range os.Args[1:] {
@@ -137,6 +684,10 @@ func human(n int64) string {
 }
 
 func inspectPath(root string) (Finding, error) {
+	return inspectPathWithWalk(root, filepath.WalkDir)
+}
+
+func inspectPathWithWalk(root string, walkDir func(string, fs.WalkDirFunc) error) (Finding, error) {
 	f := Finding{Path: root}
 	fi, err := os.Stat(root)
 	if err != nil {
@@ -148,7 +699,7 @@ func inspectPath(root string) (Finding, error) {
 		f.ModMax = fi.ModTime()
 		return f, nil
 	}
-	errWalk := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	errWalk := walkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if f.Err == "" {
 				f.Err = err.Error()
@@ -160,6 +711,9 @@ func inspectPath(root string) (Finding, error) {
 		}
 		info, e := d.Info()
 		if e != nil {
+			if f.Err == "" {
+				f.Err = e.Error()
+			}
 			return nil
 		}
 		f.Items++
@@ -169,6 +723,9 @@ func inspectPath(root string) (Finding, error) {
 		}
 		return nil
 	})
+	if errWalk != nil && f.Err == "" {
+		f.Err = errWalk.Error()
+	}
 	return f, errWalk
 }
 
@@ -200,6 +757,10 @@ func defaultConfig() Config {
 			DefaultScanPath: "~/src",
 			MaxDepth:        1,
 			DetectLanguage:  true,
+			ExcludePaths:    []string{},
+			IncludeOnly:     []string{},
+			MinAge:          "",
+			MaxAge:          "",
 		},
 		Languages: []Language{
 			{Name: "node", Enabled: true, Priority: 10, Patterns: []string{"node_modules", ".npm", ".yarn", ".pnpm-store"}, Signatures: []string{"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"}},
@@ -272,12 +833,11 @@ func main() {
 	}
 
 	flag.Parse()
-	configExplicit := false
+	explicitFlags := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "config" {
-			configExplicit = true
-		}
+		explicitFlags[f.Name] = true
 	})
+	configExplicit := explicitFlags["config"]
 
 	if *flagInit {
 		if err := writeStarterConfig(*flagConfig, *flagForce); err != nil {
@@ -294,6 +854,28 @@ func main() {
 		fmt.Println("Tip: run with --init to create a starter config")
 		os.Exit(1)
 	}
+	filterOptions := applyFilterOverrides(cfg.Options, map[string]string{
+		"exclude":      *flagExclude,
+		"include-only": *flagInclude,
+		"min-age":      *flagMinAge,
+		"max-age":      *flagMaxAge,
+	}, explicitFlags)
+	filterOptions.ExcludePaths, err = expandFilterPatterns(filterOptions.ExcludePaths)
+	if err != nil {
+		fmt.Println("invalid path filter:", err)
+		os.Exit(1)
+	}
+	filterOptions.IncludeOnly, err = expandFilterPatterns(filterOptions.IncludeOnly)
+	if err != nil {
+		fmt.Println("invalid path filter:", err)
+		os.Exit(1)
+	}
+	for _, patterns := range [][]string{filterOptions.ExcludePaths, filterOptions.IncludeOnly} {
+		if err := validatePathPatterns(patterns); err != nil {
+			fmt.Println("invalid path filter:", err)
+			os.Exit(1)
+		}
+	}
 
 	// Determine scan path
 	scanPath := cfg.Options.DefaultScanPath
@@ -306,6 +888,27 @@ func main() {
 	maxDepth := cfg.Options.MaxDepth
 	if *flagDepth > 0 {
 		maxDepth = *flagDepth
+	}
+
+	minAgeStr := filterOptions.MinAge
+	maxAgeStr := filterOptions.MaxAge
+	minAge, err := parseAgeDuration(minAgeStr)
+	if err != nil {
+		fmt.Println("invalid --min-age:", err)
+		os.Exit(1)
+	}
+	maxAge, err := parseAgeDuration(maxAgeStr)
+	if err != nil {
+		fmt.Println("invalid --max-age:", err)
+		os.Exit(1)
+	}
+
+	filters := ScanFilters{
+		ExcludePaths: filterOptions.ExcludePaths,
+		IncludeOnly:  filterOptions.IncludeOnly,
+		MinAge:       minAge,
+		MaxAge:       maxAge,
+		Now:          time.Now(),
 	}
 
 	// Filter languages
@@ -368,6 +971,9 @@ func main() {
 	if h, _ := os.Hostname(); h != "" {
 		rep.Hostname = h
 	}
+	filters.Warn = func(message string) {
+		rep.Warnings = append(rep.Warnings, message)
+	}
 
 	// Scan for cache directories
 	progress := os.Stdout
@@ -378,7 +984,7 @@ func main() {
 	if cfg.Options.DetectLanguage {
 		_, _ = fmt.Fprintln(progress, "Language detection enabled - scanning with language-specific patterns")
 	}
-	findings := scanDirectory(scanPath, maxDepth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns)
+	findings := scanDirectory(scanPath, maxDepth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns, filters)
 	rep.Findings = findings
 
 	var total int64
@@ -413,7 +1019,7 @@ func main() {
 	partialFailure := false
 	// Cleanup if requested
 	if *flagClean {
-		cacheFindings, cacheTotal := filterCacheFindings(findings)
+		cacheFindings, _ := filterCacheFindings(findings)
 
 		if len(cacheFindings) == 0 {
 			fmt.Println("\nNo cache directories found to delete.")
@@ -453,40 +1059,57 @@ func main() {
 		}
 
 		fmt.Println("\nDeleting cache directories...")
-		beforeTotal := cacheTotal
 		var deletedCount int
-		var errors []string
+		var freedBytes int64
+		var cleanupErrors []string
 
 		for _, f := range cacheFindings {
+			var checkSafe func() error
 			if !*flagUnsafeClean {
-				allowed, reason := safeCachePath(f)
-				if !allowed {
-					errors = append(errors, fmt.Sprintf("skipped %s: %s", f.Path, reason))
-					continue
+				checkSafe = func() error {
+					allowed, reason := safeCachePath(f)
+					if !allowed {
+						return errors.New(reason)
+					}
+					return nil
 				}
 			}
-			if err := os.RemoveAll(f.Path); err != nil {
-				errors = append(errors, fmt.Sprintf("%s: %v", f.Path, err))
+			fresh, deleted, attempted, deleteErr := removeCacheIfEligible(f, filters, checkSafe, time.Now, os.RemoveAll)
+			if deleteErr != nil {
+				if !attempted {
+					cleanupErrors = append(cleanupErrors, fmt.Sprintf("skipped %s: %v", f.Path, deleteErr))
+					continue
+				}
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("deletion incomplete for %s: %v", f.Path, deleteErr))
+				freed, measureErr := measureFreedBytes(fresh)
+				if measureErr != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Sprintf("could not measure partial deletion of %s: %v", f.Path, measureErr))
+				} else {
+					freedBytes += freed
+				}
+				if _, statErr := os.Stat(f.Path); os.IsNotExist(statErr) {
+					deletedCount++
+				}
+				continue
+			}
+			if !deleted {
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("skipped %s: age filter no longer passes", f.Path))
 				continue
 			}
 			deletedCount++
+			freedBytes += fresh.SizeBytes
 		}
 
-		// Re-scan to verify
-		fmt.Println("Re-scanning after cleanup...")
-		afterFindings := scanDirectory(scanPath, maxDepth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns)
-		afterTotal := totalCacheBytes(afterFindings)
-		freed := bytesFreed(beforeTotal, afterTotal)
 		fmt.Printf("\nDeleted %d directories", deletedCount)
-		if freed > 0 {
-			fmt.Printf(", freed %s", human(freed))
+		if freedBytes > 0 {
+			fmt.Printf(", freed %s", human(freedBytes))
 		}
 		fmt.Println()
 
-		if len(errors) > 0 {
+		if len(cleanupErrors) > 0 {
 			partialFailure = true
 			fmt.Println("\nErrors:")
-			for _, e := range errors {
+			for _, e := range cleanupErrors {
 				fmt.Printf("  - %s\n", e)
 			}
 		}
@@ -539,6 +1162,9 @@ func safeCachePath(f Finding) (bool, string) {
 	rel, err := filepath.Rel(root, cachePath)
 	if err != nil {
 		return false, "cache path is outside its Git repository"
+	}
+	if runtime.GOOS == "windows" {
+		rel = filepath.ToSlash(rel)
 	}
 	tracked := exec.Command("git", "-C", root, "ls-files", "--", rel)
 	if out, err := tracked.Output(); err != nil {
@@ -646,8 +1272,14 @@ func detectLanguage(dirPath string, langSignatures map[string][]string, langPrio
 }
 
 // scanDirectory walks through the directory tree up to maxDepth and matches directory names against patterns
-func scanDirectory(root string, maxDepth int, patterns []string, patternToLang map[string]string, detectLang bool, langSignatures map[string][]string, langPriorities map[string]int, langToPatterns map[string][]string) []Finding {
+func scanDirectory(root string, maxDepth int, patterns []string, patternToLang map[string]string, detectLang bool, langSignatures map[string][]string, langPriorities map[string]int, langToPatterns map[string][]string, filters ScanFilters) []Finding {
+	return scanDirectoryWithInspect(root, maxDepth, patterns, patternToLang, detectLang, langSignatures, langPriorities, langToPatterns, filters, inspectPath)
+}
+
+func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patternToLang map[string]string, detectLang bool, langSignatures map[string][]string, langPriorities map[string]int, langToPatterns map[string][]string, filters ScanFilters, inspect func(string) (Finding, error)) []Finding {
 	var findings []Finding
+	excludePathPatterns := compilePathPatterns(filters.ExcludePaths)
+	includePathPatterns := compilePathPatterns(filters.IncludeOnly)
 
 	// Directories that should not have language detection performed
 	// These directories will still be listed but with null/empty language
@@ -661,6 +1293,13 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 	if err == nil {
 		root = rootAbs
 	}
+	filterRoot := root
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		resolvedRoot := filepath.Clean(resolved)
+		if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			root = resolvedRoot
+		}
+	}
 
 	// Cache for language detection results to avoid repeated directory reads
 	langCache := make(map[string]string)
@@ -672,7 +1311,6 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 	findingsByPath := make(map[string]bool)
 	// Track excluded directories (will be reported with empty language)
 	excludedDirs := make(map[string]bool)
-
 	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // Continue on errors
@@ -701,6 +1339,14 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 			// Can't calculate relative path, skip
 			return nil
 		}
+		filterPath := cleanPath
+		if filterRoot != root {
+			filterPath = filepath.Join(filterRoot, relPath)
+		}
+		canonicalPath := cleanPath
+		if resolved, err := filepath.EvalSymlinks(cleanPath); err == nil {
+			canonicalPath = filepath.Clean(resolved)
+		}
 
 		// Count separators in relative path to get depth
 		// Empty relPath means root (shouldn't happen due to check above)
@@ -708,6 +1354,15 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 		// "proj1/node_modules" = depth 1
 		depth := strings.Count(relPath, string(filepath.Separator))
 		if depth > maxDepth {
+			return filepath.SkipDir
+		}
+
+		included := len(includePathPatterns) == 0 || pathMatchesPatternOrAncestor(cleanPath, includePathPatterns) || pathMatchesPatternOrAncestor(filterPath, includePathPatterns) || pathMatchesPatternOrAncestor(canonicalPath, includePathPatterns)
+		if len(includePathPatterns) > 0 {
+			if !included && !mayContainPatternMatch(cleanPath, includePathPatterns) && !mayContainPatternMatch(filterPath, includePathPatterns) && !mayContainPatternMatch(canonicalPath, includePathPatterns) {
+				return filepath.SkipDir
+			}
+		} else if pathMatchesPatternOrAncestor(cleanPath, excludePathPatterns) || pathMatchesPatternOrAncestor(filterPath, excludePathPatterns) || pathMatchesPatternOrAncestor(canonicalPath, excludePathPatterns) {
 			return filepath.SkipDir
 		}
 
@@ -874,8 +1529,19 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 		// This ensures cache directories are detected even if they're at depth 0
 		for _, pattern := range patternsToCheck {
 			if matchPattern(dirName, pattern) {
+				// An include-only target can be nested below a cache-named directory.
+				// Keep walking through that ancestor instead of selecting it and
+				// skipping the subtree before the included project is reached.
+				if len(includePathPatterns) > 0 && !included {
+					break
+				}
+				// An excluded descendant cannot be preserved if the parent cache
+				// directory itself is deleted, so leave the whole cache untouched.
+				if len(includePathPatterns) == 0 && (mayContainPatternMatch(cleanPath, excludePathPatterns) || mayContainPatternMatch(filterPath, excludePathPatterns) || mayContainPatternMatch(canonicalPath, excludePathPatterns)) {
+					break
+				}
 				// Found a match - calculate size
-				f, err := inspectPath(path)
+				f, err := inspect(path)
 				if err != nil {
 					f.Err = err.Error()
 				}
@@ -893,6 +1559,13 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 				} else {
 					// If no language detection, use parent directory as project root
 					f.ProjectRoot = filepath.Dir(cleanPath)
+				}
+				if (filters.MinAge > 0 || filters.MaxAge > 0) && f.Err != "" && filters.Warn != nil {
+					filters.Warn(fmt.Sprintf("cache inspection incomplete for %s: %s", f.Path, f.Err))
+				}
+				if !passesAgeFilter(f, filters) {
+					// Don't traverse a cache directory that the age filter excludes.
+					return filepath.SkipDir
 				}
 				findings = append(findings, f)
 				// Track this path in the map for O(1) lookups
@@ -965,6 +1638,25 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 			}
 			findings = append(findings, f)
 		}
+	}
+
+	if len(includePathPatterns) > 0 {
+		filtered := findings[:0]
+		for _, f := range findings {
+			candidate := f.Path
+			if !isCacheDirectory(f) && f.ProjectRoot != "" {
+				candidate = f.ProjectRoot
+			}
+			aliasCandidate := pathWithScanAlias(candidate, root, filterRoot)
+			canonicalCandidate := candidate
+			if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+				canonicalCandidate = filepath.Clean(resolved)
+			}
+			if pathMatchesPatternOrAncestor(candidate, includePathPatterns) || pathMatchesPatternOrAncestor(aliasCandidate, includePathPatterns) || pathMatchesPatternOrAncestor(canonicalCandidate, includePathPatterns) {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
 	}
 
 	return findings

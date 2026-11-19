@@ -230,6 +230,12 @@ A cross-platform Go CLI tool that scans source code directories to find and opti
 - `--scan PATH` directory to scan (overrides config default)
 - `--depth N` max scan depth (overrides config default, 0 = use config)
 - `--languages LIST` comma-separated list of languages to scan (e.g., `node,python,go`)
+- `--unsafe-clean` allow cleanup of cache paths that Git does not mark ignored (unsafe override)
+- `--exclude PATHS` comma-separated project paths to exclude from scanning and cleanup
+- `--include-only PATHS` comma-separated project paths to scan; when set, this whitelist takes precedence over `excludePaths`
+- `--min-age DURATION` only include caches at least this old (for example, `30d`)
+- `--max-age DURATION` only include caches no older than this (for example, `7d`)
+- Unified `bilge dev-cache` and `bilge clean dev-cache` commands forward `--exclude`, `--include-only`, `--min-age`, and `--max-age` to the selected task.
 - `--clean` deletes found cache directories
 - `--yes` skips confirmation prompt for cleanup
 - `--json` outputs results as JSON
@@ -241,6 +247,10 @@ version: 1
 options:
   defaultScanPath: ~/src
   maxDepth: 1  # How many levels deep to scan
+  excludePaths: []
+  includeOnly: []
+  minAge: ""
+  maxAge: ""
 
 languages:
   - name: node
@@ -279,6 +289,17 @@ languages:
 - **Exact match**: `node_modules` matches only `node_modules`
 - **Wildcard prefix**: `cmake-build-*` matches `cmake-build-debug`, `cmake-build-release`, etc.
 
+#### Path and Age Filters
+- `excludePaths` and `includeOnly` accept exact paths, descendant paths, and valid path globs; relative patterns resolve from the process working directory, whose characters are treated literally. Malformed globs fail before scanning. On Windows, path and glob comparisons are case-insensitive. Filters apply throughout the scan tree so nested projects can be selected.
+- CLI `--exclude`, `--include-only`, `--min-age`, and `--max-age` values override their corresponding config values.
+- Explicitly supplying any of these CLI flags with an empty value clears that filter from the config.
+- When `includeOnly` is configured, it acts as a whitelist and takes precedence over `excludePaths`; otherwise matching excluded roots are skipped.
+- Age filters use the newest file modification time within each cache directory. `minAge` keeps caches at least that old; `maxAge` keeps caches no older than that. Durations must be greater than zero; an empty value disables that filter. If both are set, a cache must satisfy both.
+- When an age filter is active and a cache's modification time cannot be determined or its inspection is incomplete, the cache is omitted from results and cleanup. A cache directory excluded by age is not traversed for nested findings.
+- If an excluded path is inside a cache directory, the enclosing cache is omitted from scan results and cleanup because removing it would delete the excluded path.
+- Path and age filters apply to both scans and cleanup.
+- Include-only scanning continues through cache-pattern directories that are ancestors of an included project, without selecting or deleting those ancestor directories.
+
 #### Reporting Features
 - Summary mode (default): Groups findings by language with totals
 - Detailed mode (`--details`): Shows each cache directory found with project path, cache type, language, size, and item count
@@ -306,11 +327,9 @@ All paths use `filepath.Join()` for cross-platform compatibility. Home directory
 - **Confirmation prompt**: When using `--clean`, you must confirm the deletion (unless `--yes` is used)
 - **Shows what will be deleted**: The tool displays all findings before asking for confirmation
 - **Error handling**: Deletion errors are logged and reported, but don't stop the process
+- **Git-aware cleanup**: Cleanup skips caches containing tracked files, nested Git repositories, or paths not ignored by Git. `--unsafe-clean` is the explicit override.
 
 ### Future Enhancements
-- Integration with version control (skip if in .gitignore)
-- Whitelist/blacklist per project
-- Age-based filtering (delete only old caches)
 - Backup before deletion
 - TUI interface
 
