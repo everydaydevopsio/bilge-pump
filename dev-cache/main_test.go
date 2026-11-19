@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io/fs"
@@ -950,6 +951,33 @@ func TestScanDirectoryExclusionsMatchSymlinkAliases(t *testing.T) {
 	}
 }
 
+func TestScanDirectoryCanonicalExclusionThroughSymlinkedParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink privileges vary on Windows runners")
+	}
+	workspace := t.TempDir()
+	canonicalProject := filepath.Join(workspace, "src", "real-team", "project")
+	cache := filepath.Join(canonicalProject, "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "cache.dat"), []byte("cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(workspace, "src", "link")
+	if err := os.Symlink(filepath.Join(workspace, "src", "real-team"), aliasParent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	scanRoot := filepath.Join(aliasParent, "project")
+	canonicalExclusion := filepath.Join(workspace, "src", "real-*", "project")
+	findings := scanDirectory(scanRoot, 3, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{canonicalExclusion},
+	})
+	if len(findings) != 0 {
+		t.Fatalf("canonical exclusion %q missed symlinked-parent cache: %+v", canonicalExclusion, findings)
+	}
+}
+
 func TestExpandFilterPatternsRejectsUnsetVariables(t *testing.T) {
 	previous, wasSet := os.LookupEnv("BILGE_TEST_FILTER_ROOT")
 	if err := os.Unsetenv("BILGE_TEST_FILTER_ROOT"); err != nil {
@@ -1027,6 +1055,33 @@ func TestHomeFilterPrefixIsLiteral(t *testing.T) {
 	findings = scanDirectory(parentRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, filters)
 	if len(findings) != 1 || findings[0].Path != parentCache {
 		t.Fatalf("home-parent inclusion failed outside home: %+v", findings)
+	}
+}
+
+func TestWindowsHomeGlobSeparators(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows home-glob semantics")
+	}
+	homeDir := filepath.Join(t.TempDir(), "user")
+	project := filepath.Join(homeDir, "src", "team-alpha", "project")
+	cache := filepath.Join(project, "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	pattern := "~/src/team-*/project"
+	findings := scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{pattern},
+	})
+	if len(findings) != 1 || findings[0].Path != cache {
+		t.Fatalf("forward-slash home include got %+v, want %s", findings, cache)
+	}
+	findings = scanDirectory(homeDir, 5, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		ExcludePaths: []string{pattern},
+	})
+	if len(findings) != 0 {
+		t.Fatalf("forward-slash home exclusion got %+v, want no findings", findings)
 	}
 }
 
@@ -1469,6 +1524,101 @@ func TestPartialCleanupMeasuresFreedBytesWithoutSelectionFilter(t *testing.T) {
 	}
 	if _, err := os.Stat(second); err != nil {
 		t.Fatalf("partial deletion removed remaining file: %v", err)
+	}
+}
+
+func TestWindowsCleanupReportsPartialDeletionWhenFileIsLocked(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("requires Windows file locking behavior")
+	}
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	cache := filepath.Join(repo, "project", "node_modules")
+	if err := os.MkdirAll(filepath.Join(cache, "z-locked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deletedFile := filepath.Join(cache, "a-deleted.dat")
+	lockedFile := filepath.Join(cache, "z-locked", "locked.dat")
+	if err := os.WriteFile(deletedFile, []byte("remove"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockedFile, []byte("locked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(cache), "package.json"), []byte(`{"name":"fixture"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{
+		Version:   1,
+		Options:   Options{DefaultScanPath: repo, MaxDepth: 3, DetectLanguage: true},
+		Languages: []Language{{Name: "node", Enabled: true, Patterns: []string{"node_modules"}, Signatures: []string{"package.json"}}},
+	}
+	configBytes, err := yaml.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "dev-cache.yaml")
+	if err := os.WriteFile(configPath, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "dev-cache.exe")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build dev-cache: %v: %s", err, output)
+	}
+	lockScript := filepath.Join(t.TempDir(), "lock-file.ps1")
+	script := `param([string]$path)
+$stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+[Console]::Out.WriteLine('locked')
+[Console]::Out.Flush()
+[Console]::In.ReadLine() | Out-Null
+$stream.Dispose()
+`
+	if err := os.WriteFile(lockScript, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locker := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", lockScript, lockedFile)
+	stdout, err := locker.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := locker.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lockerStderr bytes.Buffer
+	locker.Stderr = &lockerStderr
+	if err := locker.Start(); err != nil {
+		t.Fatalf("start locked-file helper: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = stdin.Write([]byte("release\n"))
+		_ = stdin.Close()
+		_ = locker.Wait()
+	})
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || strings.TrimSpace(ready) != "locked" {
+		t.Fatalf("locked-file helper did not acquire lock: %q: %v: %s", ready, err, lockerStderr.String())
+	}
+	command := exec.Command(binary, "--config", configPath, "--clean", "--yes", "--unsafe-clean")
+	output, err := command.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+		t.Fatalf("partial cleanup exit = %v, want 3; output: %s", err, output)
+	}
+	if !bytes.Contains(output, []byte("deletion incomplete")) || !bytes.Contains(output, []byte("freed 6 B")) {
+		t.Fatalf("partial cleanup output did not report failure and freed bytes: %s", output)
+	}
+	if _, err := os.Stat(deletedFile); !os.IsNotExist(err) {
+		t.Fatalf("unlocked file remained after partial cleanup: %v", err)
+	}
+	if _, err := os.Stat(lockedFile); err != nil {
+		t.Fatalf("locked file was removed or inaccessible after cleanup: %v", err)
 	}
 }
 

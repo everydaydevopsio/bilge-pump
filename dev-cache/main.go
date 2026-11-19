@@ -214,6 +214,9 @@ func compilePathPattern(pattern string) (compiledPathPattern, bool) {
 	}
 	if homePrefix {
 		pattern = pattern[2:]
+		if runtime.GOOS == "windows" {
+			pattern = strings.ReplaceAll(pattern, "/", `\`)
+		}
 	} else {
 		pattern = filepath.Clean(pattern)
 	}
@@ -1266,9 +1269,10 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 		root = rootAbs
 	}
 	filterRoot := root
-	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		if resolved, err := filepath.EvalSymlinks(root); err == nil {
-			root = filepath.Clean(resolved)
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		resolvedRoot := filepath.Clean(resolved)
+		if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			root = resolvedRoot
 		}
 	}
 
@@ -1314,6 +1318,10 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 		if filterRoot != root {
 			filterPath = filepath.Join(filterRoot, relPath)
 		}
+		canonicalPath := cleanPath
+		if resolved, err := filepath.EvalSymlinks(cleanPath); err == nil {
+			canonicalPath = filepath.Clean(resolved)
+		}
 
 		// Count separators in relative path to get depth
 		// Empty relPath means root (shouldn't happen due to check above)
@@ -1324,12 +1332,12 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 			return filepath.SkipDir
 		}
 
-		included := len(includePathPatterns) == 0 || pathMatchesPatternOrAncestor(cleanPath, includePathPatterns) || pathMatchesPatternOrAncestor(filterPath, includePathPatterns)
+		included := len(includePathPatterns) == 0 || pathMatchesPatternOrAncestor(cleanPath, includePathPatterns) || pathMatchesPatternOrAncestor(filterPath, includePathPatterns) || pathMatchesPatternOrAncestor(canonicalPath, includePathPatterns)
 		if len(includePathPatterns) > 0 {
-			if !included && !mayContainPatternMatch(cleanPath, includePathPatterns) && !mayContainPatternMatch(filterPath, includePathPatterns) {
+			if !included && !mayContainPatternMatch(cleanPath, includePathPatterns) && !mayContainPatternMatch(filterPath, includePathPatterns) && !mayContainPatternMatch(canonicalPath, includePathPatterns) {
 				return filepath.SkipDir
 			}
-		} else if pathMatchesPatternOrAncestor(cleanPath, excludePathPatterns) || pathMatchesPatternOrAncestor(filterPath, excludePathPatterns) {
+		} else if pathMatchesPatternOrAncestor(cleanPath, excludePathPatterns) || pathMatchesPatternOrAncestor(filterPath, excludePathPatterns) || pathMatchesPatternOrAncestor(canonicalPath, excludePathPatterns) {
 			return filepath.SkipDir
 		}
 
@@ -1504,7 +1512,7 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 				}
 				// An excluded descendant cannot be preserved if the parent cache
 				// directory itself is deleted, so leave the whole cache untouched.
-				if len(includePathPatterns) == 0 && (mayContainPatternMatch(cleanPath, excludePathPatterns) || mayContainPatternMatch(filterPath, excludePathPatterns)) {
+				if len(includePathPatterns) == 0 && (mayContainPatternMatch(cleanPath, excludePathPatterns) || mayContainPatternMatch(filterPath, excludePathPatterns) || mayContainPatternMatch(canonicalPath, excludePathPatterns)) {
 					break
 				}
 				// Found a match - calculate size
@@ -1612,7 +1620,11 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 				candidate = f.ProjectRoot
 			}
 			aliasCandidate := pathWithScanAlias(candidate, root, filterRoot)
-			if pathMatchesPatternOrAncestor(candidate, includePathPatterns) || pathMatchesPatternOrAncestor(aliasCandidate, includePathPatterns) {
+			canonicalCandidate := candidate
+			if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+				canonicalCandidate = filepath.Clean(resolved)
+			}
+			if pathMatchesPatternOrAncestor(candidate, includePathPatterns) || pathMatchesPatternOrAncestor(aliasCandidate, includePathPatterns) || pathMatchesPatternOrAncestor(canonicalCandidate, includePathPatterns) {
 				filtered = append(filtered, f)
 			}
 		}
