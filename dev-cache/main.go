@@ -594,23 +594,48 @@ func recheckAgeEligibility(f Finding, filters ScanFilters, now func() time.Time)
 	return fresh, passesAgeFilter(fresh, filters), nil
 }
 
-func removeCacheIfEligible(f Finding, filters ScanFilters, checkSafe func() error, now func() time.Time, remove func(string) error) (Finding, bool, error) {
+func removeCacheIfEligible(f Finding, filters ScanFilters, checkSafe func() error, now func() time.Time, remove func(string) error) (Finding, bool, bool, error) {
 	if checkSafe != nil {
 		if err := checkSafe(); err != nil {
-			return f, false, err
+			return f, false, false, err
 		}
 	}
 	fresh, eligible, err := recheckAgeEligibility(f, filters, now)
 	if err != nil {
-		return fresh, false, fmt.Errorf("cannot verify age eligibility: %w", err)
+		return fresh, false, false, fmt.Errorf("cannot verify age eligibility: %w", err)
 	}
 	if !eligible {
-		return fresh, false, nil
+		return fresh, false, false, nil
 	}
 	if err := remove(f.Path); err != nil {
-		return fresh, false, err
+		return fresh, false, true, err
 	}
-	return fresh, true, nil
+	return fresh, true, true, nil
+}
+
+func measureFreedBytes(f Finding) (int64, error) {
+	remaining, err := inspectPath(f.Path)
+	if os.IsNotExist(err) {
+		return f.SizeBytes, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if remaining.Err != "" {
+		return 0, fmt.Errorf("remaining cache inspection is incomplete: %s", remaining.Err)
+	}
+	return bytesFreed(f.SizeBytes, remaining.SizeBytes), nil
+}
+
+func pathWithScanAlias(path, resolvedRoot, filterRoot string) string {
+	if filterRoot == resolvedRoot {
+		return path
+	}
+	rel, err := filepath.Rel(resolvedRoot, path)
+	if err != nil {
+		return path
+	}
+	return filepath.Join(filterRoot, rel)
 }
 
 func checkVersionFlag() bool {
@@ -1025,9 +1050,22 @@ func main() {
 					return nil
 				}
 			}
-			fresh, deleted, deleteErr := removeCacheIfEligible(f, filters, checkSafe, time.Now, os.RemoveAll)
+			fresh, deleted, attempted, deleteErr := removeCacheIfEligible(f, filters, checkSafe, time.Now, os.RemoveAll)
 			if deleteErr != nil {
-				cleanupErrors = append(cleanupErrors, fmt.Sprintf("skipped %s: %v", f.Path, deleteErr))
+				if !attempted {
+					cleanupErrors = append(cleanupErrors, fmt.Sprintf("skipped %s: %v", f.Path, deleteErr))
+					continue
+				}
+				cleanupErrors = append(cleanupErrors, fmt.Sprintf("deletion incomplete for %s: %v", f.Path, deleteErr))
+				freed, measureErr := measureFreedBytes(fresh)
+				if measureErr != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Sprintf("could not measure partial deletion of %s: %v", f.Path, measureErr))
+				} else {
+					freedBytes += freed
+				}
+				if _, statErr := os.Stat(f.Path); os.IsNotExist(statErr) {
+					deletedCount++
+				}
 				continue
 			}
 			if !deleted {
@@ -1573,7 +1611,8 @@ func scanDirectory(root string, maxDepth int, patterns []string, patternToLang m
 			if !isCacheDirectory(f) && f.ProjectRoot != "" {
 				candidate = f.ProjectRoot
 			}
-			if pathMatchesPatternOrAncestor(candidate, includePathPatterns) {
+			aliasCandidate := pathWithScanAlias(candidate, root, filterRoot)
+			if pathMatchesPatternOrAncestor(candidate, includePathPatterns) || pathMatchesPatternOrAncestor(aliasCandidate, includePathPatterns) {
 				filtered = append(filtered, f)
 			}
 		}

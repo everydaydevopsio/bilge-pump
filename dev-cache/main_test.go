@@ -921,6 +921,33 @@ func TestScanDirectoryExclusionsMatchSymlinkAliases(t *testing.T) {
 			t.Fatalf("symlinked scan selected excluded cache for %q: %+v", exclusion, findings)
 		}
 	}
+	includePattern := filepath.Join(workspace, "src", "l*", "project")
+	compiledInclude, ok := compilePathPattern(includePattern)
+	if !ok || !matchesPathPattern(filepath.Join(aliasRoot, "project"), compiledInclude) {
+		t.Fatalf("alias candidate does not match include glob: alias=%q pattern=%+v ok=%v", filepath.Join(aliasRoot, "project"), compiledInclude, ok)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(aliasRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasCandidate := pathWithScanAlias(filepath.Join(resolvedRoot, "project", "node_modules"), resolvedRoot, aliasRoot)
+	if !pathMatchesPatternOrAncestor(aliasCandidate, []compiledPathPattern{compiledInclude}) {
+		t.Fatalf("mapped alias candidate %q did not match glob %+v (root %q)", aliasCandidate, compiledInclude, resolvedRoot)
+	}
+	findings := scanDirectory(aliasRoot, 4, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{
+		IncludeOnly: []string{includePattern},
+	})
+	if len(findings) != 1 {
+		t.Fatalf("symlink-alias include was dropped by final filtering: %+v", findings)
+	}
+	resolvedCache, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedFinding, err := filepath.EvalSymlinks(findings[0].Path)
+	if err != nil || resolvedFinding != resolvedCache {
+		t.Fatalf("symlink-alias include selected %q, want cache %q (resolve error %v)", findings[0].Path, resolvedCache, err)
+	}
 }
 
 func TestExpandFilterPatternsRejectsUnsetVariables(t *testing.T) {
@@ -1343,11 +1370,11 @@ func TestRecheckAgeEligibilityRejectsCacheRefreshedAfterScan(t *testing.T) {
 		}
 		return os.Chtimes(file, refreshed, refreshed)
 	}
-	fresh, deleted, err := removeCacheIfEligible(finding, filters, checkSafe, time.Now, os.RemoveAll)
+	fresh, deleted, attempted, err := removeCacheIfEligible(finding, filters, checkSafe, time.Now, os.RemoveAll)
 	if err != nil {
 		t.Fatalf("removeCacheIfEligible: %v", err)
 	}
-	if deleted {
+	if deleted || attempted {
 		t.Fatal("refreshed cache remained eligible for cleanup")
 	}
 	if fresh.SizeBytes <= finding.SizeBytes {
@@ -1393,15 +1420,55 @@ func TestRemoveCacheUsesClockAfterSafetyCheck(t *testing.T) {
 		clockNow = scanTime.Add(2 * time.Hour)
 		return nil
 	}
-	_, deleted, err := removeCacheIfEligible(finding, filters, checkSafe, func() time.Time { return clockNow }, os.RemoveAll)
+	_, deleted, attempted, err := removeCacheIfEligible(finding, filters, checkSafe, func() time.Time { return clockNow }, os.RemoveAll)
 	if err != nil {
 		t.Fatalf("removeCacheIfEligible: %v", err)
 	}
-	if deleted {
+	if deleted || attempted {
 		t.Fatal("cache crossing max-age during safety checks was deleted")
 	}
 	if _, err := os.Stat(cache); err != nil {
 		t.Fatalf("cache crossing max-age was removed: %v", err)
+	}
+}
+
+func TestPartialCleanupMeasuresFreedBytesWithoutSelectionFilter(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "node_modules")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(cache, "first.dat")
+	second := filepath.Join(cache, "second.dat")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("cache-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finding, err := inspectPath(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding.Pattern = "node_modules"
+	deletedFileSize := int64(len("cache-bytes"))
+	remove := func(string) error {
+		if err := os.Remove(first); err != nil {
+			return err
+		}
+		return errors.New("simulated locked file")
+	}
+	fresh, deleted, attempted, err := removeCacheIfEligible(finding, ScanFilters{}, nil, time.Now, remove)
+	if err == nil || deleted || !attempted {
+		t.Fatalf("partial remove result = finding:%+v deleted:%v attempted:%v err:%v", fresh, deleted, attempted, err)
+	}
+	freed, err := measureFreedBytes(fresh)
+	if err != nil {
+		t.Fatalf("measureFreedBytes: %v", err)
+	}
+	if freed != deletedFileSize {
+		t.Fatalf("measured freed bytes = %d, want %d", freed, deletedFileSize)
+	}
+	if _, err := os.Stat(second); err != nil {
+		t.Fatalf("partial deletion removed remaining file: %v", err)
 	}
 }
 
