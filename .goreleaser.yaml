@@ -160,12 +160,20 @@ homebrew_casks:
     ids:
       - bilge
 
-    # List all three binaries to install
+    # These binaries are present in both macOS and Linux archives.
     binaries:
       - bilge
       - dev-cache
       - git-cleaner
-      - bilge-macos
+
+    # Each platform archive contains only its own cleaner.
+    custom_block: |
+      on_macos do
+        binary "bilge-macos"
+      end
+      on_linux do
+        binary "bilge-linux"
+      end
 
     repository:
       owner: everydaydevopsio
