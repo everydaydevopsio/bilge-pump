@@ -1,24 +1,22 @@
 # Scheduled Runs
 
-Use scheduled jobs to run cache cleanup during low-usage hours.
+Use the unified `bilge` command to schedule scans or cleanup during low-usage hours.
 
-## cron (Linux/macOS)
+## cron (Linux)
 
 Weekly at 3:00 AM every Sunday:
 
 ```cron
-0 3 * * 0 /usr/local/bin/dev-cache --scan ~/src --clean --yes >> ~/cache-cleaner.log 2>&1
-0 3 * * 0 /usr/local/bin/git-cleaner --scan ~/src --clean >> ~/cache-cleaner.log 2>&1
-0 3 * * 0 /usr/local/bin/mac-cache-cleaner --clean >> ~/cache-cleaner.log 2>&1
+0 3 * * 0 /absolute/path/to/bilge clean --all --yes >> "$HOME/bilge-cleanup.log" 2>&1
 ```
 
-Notes:
-- Update binary paths based on your install location (`which dev-cache`, `which git-cleaner`, `which mac-cache-cleaner`).
-- Keep log redirection enabled for troubleshooting.
+Replace `/absolute/path/to/bilge` with the path returned by `command -v bilge`. The `--yes` flag skips the dev-cache confirmation prompt. Keep log redirection enabled for troubleshooting.
+
+On macOS, prefer `launchd`; cron is supported but Apple recommends `launchd` for timed jobs.
 
 ## launchd (macOS)
 
-Create `~/Library/LaunchAgents/com.cache-cleaner.weekly.plist`:
+Find the installed executable with `command -v bilge`, then create `~/Library/LaunchAgents/com.bilge.weekly.plist`. Replace `/absolute/path/to/bilge` and `YOUR_USER` with the values for your machine:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,18 +24,20 @@ Create `~/Library/LaunchAgents/com.cache-cleaner.weekly.plist`:
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.cache-cleaner.weekly</string>
+  <string>com.bilge.weekly</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/mac-cache-cleaner</string>
+    <string>/absolute/path/to/bilge</string>
     <string>--clean</string>
+    <string>--all</string>
+    <string>--yes</string>
   </array>
 
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Hour</key>
     <integer>3</integer>
     <key>Minute</key>
@@ -45,9 +45,9 @@ Create `~/Library/LaunchAgents/com.cache-cleaner.weekly.plist`:
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/YOUR_USER/cache-cleaner.log</string>
+  <string>/Users/YOUR_USER/Library/Logs/bilge-cleanup.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/YOUR_USER/cache-cleaner.log</string>
+  <string>/Users/YOUR_USER/Library/Logs/bilge-cleanup.log</string>
 </dict>
 </plist>
 ```
@@ -55,16 +55,11 @@ Create `~/Library/LaunchAgents/com.cache-cleaner.weekly.plist`:
 Load and start:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.cache-cleaner.weekly.plist
-launchctl start com.cache-cleaner.weekly
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.bilge.weekly.plist
+launchctl kickstart "gui/$(id -u)/com.bilge.weekly"
 ```
 
 Unload:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.cache-cleaner.weekly.plist
-```
-
-## Homebrew services
-
-`brew services` is best for long-running daemons, not periodic CLI jobs. For periodic cleanup, prefer `cron` or `launchd`.
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.bilge.weekly.plist

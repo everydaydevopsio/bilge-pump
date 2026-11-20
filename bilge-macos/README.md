@@ -1,10 +1,10 @@
-# mac-cache-cleaner
+# bilge-macos
 
-[![CI](https://github.com/markcallen/cache-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/markcallen/cache-cleaner/actions/workflows/ci.yml)
-[![Release](https://github.com/markcallen/cache-cleaner/actions/workflows/release.yml/badge.svg)](https://github.com/markcallen/cache-cleaner/actions/workflows/release.yml)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/markcallen/cache-cleaner?filename=dev-cache%2Fgo.mod)](https://go.dev/)
-[![License](https://img.shields.io/github/license/markcallen/cache-cleaner)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/markcallen/cache-cleaner)](https://github.com/markcallen/cache-cleaner/releases)
+[![CI](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml)
+[![Release](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/everydaydevopsio/bilge-pump?filename=dev-cache%2Fgo.mod)](https://go.dev/)
+[![License](https://img.shields.io/github/license/everydaydevopsio/bilge-pump)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/everydaydevopsio/bilge-pump)](https://github.com/everydaydevopsio/bilge-pump/releases)
 
 A macOS-specific Go CLI tool that scans and cleans developer tool caches (Docker, npm, Homebrew, etc.) using **safe, official cleanup commands**—never `rm -rf`.
 
@@ -25,11 +25,11 @@ A macOS-specific Go CLI tool that scans and cleans developer tool caches (Docker
 
 ```bash
 git clone <repository>
-cd mac-cache-cleaner
+cd bilge-macos
 make build
 ```
 
-The binary will be in `build/mac-cache-cleaner`.
+The binary will be in `build/bilge-macos`.
 
 ### Cross-compilation
 
@@ -50,29 +50,29 @@ make build-darwin  # macOS builds only
 
 1. **Initialize config**:
 ```bash
-./build/mac-cache-cleaner --init
+./build/bilge-macos --init
 ```
 
-This creates a config file at `~/.config/mac-cache-cleaner/config.yaml`.
+This creates a config file at `$XDG_CONFIG_HOME/bilge-macos/config.yaml` when `XDG_CONFIG_HOME` is set, or `~/.config/bilge-macos/config.yaml` otherwise.
 
 2. **Scan for cache usage** (dry-run):
 ```bash
-./build/mac-cache-cleaner
+./build/bilge-macos
 ```
 
 3. **See detailed breakdown**:
 ```bash
-./build/mac-cache-cleaner --details
+./build/bilge-macos --details
 ```
 
 4. **Clean specific targets**:
 ```bash
-./build/mac-cache-cleaner --targets brew,npm --clean
+./build/bilge-macos --targets brew,npm --clean
 ```
 
 5. **Clean all enabled targets**:
 ```bash
-./build/mac-cache-cleaner --clean
+./build/bilge-macos --clean
 ```
 
 ## Command-Line Arguments
@@ -81,7 +81,7 @@ This creates a config file at `~/.config/mac-cache-cleaner/config.yaml`.
 |------|-------------|
 | `--init` | Write a starter config to `--config` and exit |
 | `--force` | Force overwrite existing config (use with --init) |
-| `--config PATH` | Path to YAML config (default: `~/.config/mac-cache-cleaner/config.yaml`) |
+| `--config PATH` | Path to YAML config (default: XDG-aware config path) |
 | `--targets LIST` | Comma-separated targets to scan/clean (or 'all') |
 | `--clean` | Run safe CLI clean commands (default: dry-run) |
 | `--json` | Output results as JSON |
@@ -170,7 +170,7 @@ Paths support:
 Each target can specify required tools. Use `--check-tools` to verify all required tools are installed:
 
 ```bash
-./build/mac-cache-cleaner --check-tools
+./build/bilge-macos --check-tools
 ```
 
 This will show which tools are missing and provide installation commands.
@@ -180,43 +180,43 @@ This will show which tools are missing and provide installation commands.
 ### List available targets
 
 ```bash
-./build/mac-cache-cleaner --list-targets
+./build/bilge-macos --list-targets
 ```
 
 ### Check tool requirements
 
 ```bash
-./build/mac-cache-cleaner --check-tools
+./build/bilge-macos --check-tools
 ```
 
 ### Scan specific targets
 
 ```bash
-./build/mac-cache-cleaner --targets brew,npm,yarn
+./build/bilge-macos --targets brew,npm,yarn
 ```
 
 ### Clean specific targets
 
 ```bash
-./build/mac-cache-cleaner --targets docker,brew --clean
+./build/bilge-macos --targets docker,brew --clean
 ```
 
 ### Use custom config location
 
 ```bash
-./build/mac-cache-cleaner --config /path/to/config.yaml
+./build/bilge-macos --config /path/to/config.yaml
 ```
 
 ### JSON output for scripting
 
 ```bash
-./build/mac-cache-cleaner --json > cache-report.json
+./build/bilge-macos --json > cache-report.json
 ```
 
 ### Detailed view
 
 ```bash
-./build/mac-cache-cleaner --details
+./build/bilge-macos --details
 ```
 
 ## Output Modes

@@ -1,4 +1,4 @@
-APP_NAME=mac-cache-cleaner
+APP_NAME=bilge-macos
 VERSION=1.0.0
 BUILD_DIR=build
 ZIP_NAME=$(APP_NAME)-$(VERSION).zip

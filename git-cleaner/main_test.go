@@ -39,6 +39,16 @@ func TestCheckVersionFlag(t *testing.T) {
 	}
 }
 
+func TestConfigLoadErrorOnlyIgnoresImplicitMissingConfig(t *testing.T) {
+	missing := &os.PathError{Op: "open", Path: "missing.yaml", Err: os.ErrNotExist}
+	if err := configLoadError(missing, false); err != nil {
+		t.Fatalf("implicit missing config error = %v, want nil", err)
+	}
+	if err := configLoadError(missing, true); err == nil {
+		t.Fatal("explicit missing config should be an error")
+	}
+}
+
 func TestHuman(t *testing.T) {
 	tests := []struct {
 		in   int64

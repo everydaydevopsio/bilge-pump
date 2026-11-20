@@ -1,10 +1,10 @@
 # git-cleaner
 
-[![CI](https://github.com/markcallen/cache-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/markcallen/cache-cleaner/actions/workflows/ci.yml)
-[![Release](https://github.com/markcallen/cache-cleaner/actions/workflows/release.yml/badge.svg)](https://github.com/markcallen/cache-cleaner/actions/workflows/release.yml)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/markcallen/cache-cleaner?filename=dev-cache%2Fgo.mod)](https://go.dev/)
-[![License](https://img.shields.io/github/license/markcallen/cache-cleaner)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/markcallen/cache-cleaner)](https://github.com/markcallen/cache-cleaner/releases)
+[![CI](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml)
+[![Release](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/everydaydevopsio/bilge-pump?filename=dev-cache%2Fgo.mod)](https://go.dev/)
+[![License](https://img.shields.io/github/license/everydaydevopsio/bilge-pump)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/everydaydevopsio/bilge-pump)](https://github.com/everydaydevopsio/bilge-pump/releases)
 
 A cross-platform Go CLI tool that scans directories for `.git` directories, reports their sizes, and optionally optimizes repositories using `git gc`.
 
@@ -45,6 +45,15 @@ make build-darwin  # macOS builds only
 
 ## Quick Start
 
+Create a default config once, then run without `--scan`:
+
+```bash
+git-cleaner --init
+git-cleaner
+```
+
+Config location: `$XDG_CONFIG_HOME/git-cleaner/config.yaml` when set, otherwise `~/.config/git-cleaner/config.yaml` on Unix-like systems and the OS user config directory on Windows. The starter config uses `~/src` when present, otherwise the home directory. `--scan` overrides its configured path.
+
 1. **Scan for repositories** (dry-run):
 ```bash
 ./build/git-cleaner --scan ~/src
@@ -59,7 +68,11 @@ make build-darwin  # macOS builds only
 
 | Flag | Description |
 |------|-------------|
-| `--scan PATH` | Directory to scan for .git directories (required) |
+| `--scan PATH` | Directory to scan for .git directories (overrides config default) |
+| `--config PATH` | Path to YAML config (default: XDG-aware git-cleaner config path) |
+| `--init` | Write a starter config and exit |
+| `--force` | Overwrite config when used with `--init` |
+| `--json` | Output a structured report for scripts |
 | `--clean` | Run `git gc` in each repository and show disk savings |
 
 ## Examples

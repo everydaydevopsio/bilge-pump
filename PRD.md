@@ -1,7 +1,7 @@
-# Product Requirements Document (PRD): cache-cleaner
+# Product Requirements Document (PRD): bilge
 
 ## Overview
-The cache-cleaner project consists of three cross-platform Go CLI tools designed to help developers reclaim disk space by identifying and cleaning various types of cache directories and developer cruft. Each tool serves a specific purpose and can be used independently or together.
+Bilge is a cross-platform Go toolkit for reclaiming disk space by identifying and cleaning developer caches and repository metadata. The unified command and Homebrew cask are both named `bilge`; the macOS, Linux, and Windows platform tasks are `bilge-macos`, `bilge-linux`, and `bilge-windows`.
 
 ## Project Goals
 - Safety first (no direct deletions where possible, use official tool commands)
@@ -11,10 +11,51 @@ The cache-cleaner project consists of three cross-platform Go CLI tools designed
 - Transparent size reporting
 - Selective filtering for targeted operations
 - JSON output for automation/CI integration
+- A single `bilge` executable that runs the full platform-appropriate cleanup or selected cleanup tasks
+- The public command, release archive prefix, installer selection, and Homebrew cask use the name `bilge` beginning with v2.1.0.
+- Configuration stored under the XDG Base Directory Specification on Unix-like systems, honoring `XDG_CONFIG_HOME`
+
+## Unified `bilge` CLI
+
+### Overview
+Ship one unified `bilge` command for macOS, Linux, and Windows. The release bundles its task executables in the same install directory; users invoke `bilge` for `scan`, `clean`, and named-tool commands. The command locates bundled tools beside itself, and does not require users to install Go or put each tool on `PATH`.
+
+### Configuration
+- The unified config is stored at `$XDG_CONFIG_HOME/bilge-pump/config.yaml` when `XDG_CONFIG_HOME` is set; otherwise use the platform user config directory (`~/.config/bilge-pump/config.yaml` on Unix and the OS config directory on Windows).
+- `--config` overrides the default path.
+- Existing tool configs remain readable at their XDG-aware per-tool paths, and `git-cleaner` gains config support for its default scan path.
+- A first run works with built-in sensible defaults; `--init` writes a customizable config.
+- A local `make bilge` build places the launcher and all host-platform task executables together under `build/`.
+- Cross-build cleaner targets write into OS/architecture-specific subdirectories and do not overwrite the native bundle under `build/`.
+- Selecting `bilge` in `install.sh` installs the launcher and all task executables it needs; selecting a standalone cleaner still installs only that tool.
+- Legacy component executables use their built-in starter config when their default XDG/platform config is absent; an explicitly supplied missing `--config` path remains an error.
+- Explicit missing component configs remain errors even when the supplied path happens to equal that tool's default config path.
+- The unified CLI consumes orchestration flags itself, routes `--yes` only to project cache cleanup, and rejects task-specific arguments that are invalid for any selected task before starting a clean operation.
+- Boolean orchestration flags honor explicit true/false values; invalid values fail before any child process starts.
+- Missing explicitly named config files are errors in every tool; built-in defaults apply only when the default config path was implicit.
+- The unified command accepts only known bundled task names and never launches arbitrary executables from configuration.
+- Windows release archives are ZIP files matching `install.ps1`; macOS and Linux retain tar.gz archives.
+
+### CLI and behavior
+- `bilge scan` reports findings across tasks without changing files.
+- `bilge clean --all` runs platform-appropriate cleanup tasks; `bilge clean <task>` or `bilge <task>` selects one task.
+- Individual legacy tools remain available for compatibility.
+- One shared JSON report schema and exit-code convention apply to unified orchestration.
+- `bilge scan --json` emits a valid JSON envelope with each selected task's structured report; task progress stays on stderr.
+- Platform builds cover macOS, Linux, and Windows (amd64 and arm64 where supported).
+- Windows batch-based cleanup commands preserve executable paths and argument boundaries containing spaces and shell metacharacters; values containing percent signs are rejected because `cmd.exe` expands them before batch execution.
+- Cleanup remains dry-run by default; destructive tasks require explicit `clean` intent and task-level safety controls.
+- Project cache deletion skips paths with tracked files or paths that Git does not mark ignored unless the user supplies the explicit `--unsafe-clean` override.
+- Git safety checks discover the repository from each cache directory, including projects nested under non-repository grouping directories.
+- Platform cleaner scans list each selected target and its planned cleanup commands, including targets such as Docker that have no filesystem paths.
+- Platform cleaner rejects unknown, empty, and mixed-invalid `--targets` selections before scanning or running cleanup commands.
+- Platform cleaner scans report filesystem inspection failures and return a partial-failure exit code; nonexistent optional cache paths are omitted without error.
+- macOS Homebrew post-install handling removes quarantine from the unified launcher as well as its bundled task executables.
+- Docker cleanup preserves named volumes by default; Android SDK updates and commands that install software or start services are excluded from cleanup defaults.
 
 ---
 
-## mac-cache-cleaner
+## bilge-macos
 
 ### Overview
 A safe, config-driven Go CLI for macOS that frees disk space using **official tool commands** (Docker, npm/yarn/pnpm, Go, Maven, Brew, and many more) instead of deleting files directly.
@@ -31,9 +72,9 @@ A safe, config-driven Go CLI for macOS that frees disk space using **official to
 ### Key Features
 
 #### CLI Flags
-- `--init` writes starter config to `~/.config/mac-cache-cleaner/config.yaml`
+- `--init` writes starter config to `~/.config/bilge-macos/config.yaml`
 - `--force` forces overwrite of existing config when used with `--init`
-- `--config` specifies path to YAML config (defaults to `~/.config/mac-cache-cleaner/config.yaml`)
+- `--config` specifies path to YAML config (defaults to `~/.config/bilge-macos/config.yaml`)
 - `--clean` executes cleanup commands (default: dry-run mode)
 - `--targets` filters targets to scan/clean (comma-separated or "all")
 - `--details` shows detailed per-directory information
@@ -161,7 +202,7 @@ The `--list-targets` flag shows all available targets:
 
 ### Future Enhancements
 - TUI interface
-- Homebrew formula
+- Homebrew cask
 - Scheduled runs
 - CI/CD integration examples
 - Windows/Linux support
@@ -189,6 +230,12 @@ A cross-platform Go CLI tool that scans source code directories to find and opti
 - `--scan PATH` directory to scan (overrides config default)
 - `--depth N` max scan depth (overrides config default, 0 = use config)
 - `--languages LIST` comma-separated list of languages to scan (e.g., `node,python,go`)
+- `--unsafe-clean` allow cleanup of cache paths that Git does not mark ignored (unsafe override)
+- `--exclude PATHS` comma-separated project paths to exclude from scanning and cleanup
+- `--include-only PATHS` comma-separated project paths to scan; when set, this whitelist takes precedence over `excludePaths`
+- `--min-age DURATION` only include caches at least this old (for example, `30d`)
+- `--max-age DURATION` only include caches no older than this (for example, `7d`)
+- Unified `bilge dev-cache` and `bilge clean dev-cache` commands forward `--exclude`, `--include-only`, `--min-age`, and `--max-age` to the selected task.
 - `--clean` deletes found cache directories
 - `--yes` skips confirmation prompt for cleanup
 - `--json` outputs results as JSON
@@ -200,6 +247,10 @@ version: 1
 options:
   defaultScanPath: ~/src
   maxDepth: 1  # How many levels deep to scan
+  excludePaths: []
+  includeOnly: []
+  minAge: ""
+  maxAge: ""
 
 languages:
   - name: node
@@ -238,6 +289,17 @@ languages:
 - **Exact match**: `node_modules` matches only `node_modules`
 - **Wildcard prefix**: `cmake-build-*` matches `cmake-build-debug`, `cmake-build-release`, etc.
 
+#### Path and Age Filters
+- `excludePaths` and `includeOnly` accept exact paths, descendant paths, and valid path globs; relative patterns resolve from the process working directory, whose characters are treated literally. Malformed globs fail before scanning. On Windows, path and glob comparisons are case-insensitive. Filters apply throughout the scan tree so nested projects can be selected.
+- CLI `--exclude`, `--include-only`, `--min-age`, and `--max-age` values override their corresponding config values.
+- Explicitly supplying any of these CLI flags with an empty value clears that filter from the config.
+- When `includeOnly` is configured, it acts as a whitelist and takes precedence over `excludePaths`; otherwise matching excluded roots are skipped.
+- Age filters use the newest file modification time within each cache directory. `minAge` keeps caches at least that old; `maxAge` keeps caches no older than that. Durations must be greater than zero; an empty value disables that filter. If both are set, a cache must satisfy both.
+- When an age filter is active and a cache's modification time cannot be determined or its inspection is incomplete, the cache is omitted from results and cleanup. A cache directory excluded by age is not traversed for nested findings.
+- If an excluded path is inside a cache directory, the enclosing cache is omitted from scan results and cleanup because removing it would delete the excluded path.
+- Path and age filters apply to both scans and cleanup.
+- Include-only scanning continues through cache-pattern directories that are ancestors of an included project, without selecting or deleting those ancestor directories.
+
 #### Reporting Features
 - Summary mode (default): Groups findings by language with totals
 - Detailed mode (`--details`): Shows each cache directory found with project path, cache type, language, size, and item count
@@ -265,11 +327,9 @@ All paths use `filepath.Join()` for cross-platform compatibility. Home directory
 - **Confirmation prompt**: When using `--clean`, you must confirm the deletion (unless `--yes` is used)
 - **Shows what will be deleted**: The tool displays all findings before asking for confirmation
 - **Error handling**: Deletion errors are logged and reported, but don't stop the process
+- **Git-aware cleanup**: Cleanup skips caches containing tracked files, nested Git repositories, or paths not ignored by Git. `--unsafe-clean` is the explicit override.
 
 ### Future Enhancements
-- Integration with version control (skip if in .gitignore)
-- Whitelist/blacklist per project
-- Age-based filtering (delete only old caches)
 - Backup before deletion
 - TUI interface
 
@@ -369,7 +429,7 @@ All three apps support:
 | `all` | Build all applications (default) |
 | `dev-cache` | Build dev-cache application only |
 | `git-cleaner` | Build git-cleaner application only |
-| `mac-cache-cleaner` | Build mac-cache-cleaner application only |
+| `bilge-macos` | Build bilge-macos application only |
 | `build` | Build all applications |
 | `test` | Run tests in all applications |
 | `fmt` | Format code in all applications |
@@ -393,8 +453,8 @@ make release-snapshot
 
 # Artifacts will be in ./dist/
 # - Individual binaries: dev-cache-darwin-amd64, etc.
-# - Homebrew tarball: cache-cleaner-VERSION-darwin-{amd64,arm64}.tar.gz
-# - Homebrew formula: dist/homebrew/Formula/cache-cleaner.rb
+# - Homebrew tarball: bilge-VERSION-darwin-{amd64,arm64}.tar.gz
+# - Homebrew cask: dist/homebrew/Casks/bilge.rb
 ```
 
 ### Creating a Release
@@ -421,29 +481,34 @@ make release-snapshot
      - Combined tarballs for Homebrew
      - Checksums for verification
      - Auto-generated changelog
-   - Updates Homebrew formula in `markcallen/homebrew-cache-cleaner`
-   - Commits formula changes with proper checksums
+   - Updates the Homebrew cask in `everydaydevopsio/homebrew-bilge-pump`
+   - Commits cask changes with proper checksums
 
 4. **Verify the release:**
-   - Check GitHub Releases: https://github.com/markcallen/cache-cleaner/releases
-   - Check Homebrew formula: https://github.com/markcallen/homebrew-cache-cleaner/tree/main/Formula
-   - Test installation: `brew upgrade cache-cleaner`
+   - Check GitHub Releases: https://github.com/everydaydevopsio/bilge-pump/releases
+   - Check Homebrew cask: https://github.com/everydaydevopsio/homebrew-bilge-pump/tree/main/Casks
+   - Trust and test installation:
+     ```bash
+     brew trust --cask everydaydevopsio/bilge-pump/bilge
+     brew upgrade --cask bilge
+     ```
 
 ### Troubleshooting Releases
 
-**Formula not found after release:**
+**Cask not found after release:**
 
-If `brew install cache-cleaner` fails with "No available formula":
+If `brew install bilge` fails with "No available cask":
 
-1. Check that the formula was pushed to the tap:
-   - Visit: https://github.com/markcallen/homebrew-cache-cleaner/tree/main/Formula
-   - You should see `cache-cleaner.rb`
+1. Check that the cask was pushed to the tap:
+   - Visit: https://github.com/everydaydevopsio/homebrew-bilge-pump/tree/main/Casks
+   - You should see `bilge.rb`
 
 2. Update Homebrew and retry:
    ```bash
    brew update
-   brew tap markcallen/cache-cleaner
-   brew install cache-cleaner
+   brew tap everydaydevopsio/bilge-pump
+   brew trust --cask everydaydevopsio/bilge-pump/bilge
+   brew install --cask bilge
    ```
 
 **Token errors in GitHub Actions:**
@@ -451,7 +516,7 @@ If `brew install cache-cleaner` fails with "No available formula":
 If you see authentication errors in the release workflow:
 
 1. Verify the secret exists:
-   - Go to: https://github.com/markcallen/cache-cleaner/settings/secrets/actions
+   - Go to: https://github.com/everydaydevopsio/bilge-pump/settings/secrets/actions
    - Look for `HOMEBREW_TAP_GITHUB_TOKEN`
 
 2. Verify the token has the correct permissions:
@@ -464,10 +529,10 @@ If you see authentication errors in the release workflow:
 
 If users report checksum errors:
 
-1. The formula might be out of sync with the release
+1. The cask might be out of sync with the release
 2. Re-run the release workflow or manually update checksums
 3. Check that GoReleaser successfully updated the tap
-4. Verify the formula at: https://github.com/markcallen/homebrew-cache-cleaner/tree/main/Formula
+4. Verify the cask at: https://github.com/everydaydevopsio/homebrew-bilge-pump/tree/main/Casks
 
 ### GoReleaser Configuration
 
@@ -482,12 +547,12 @@ The project uses GoReleaser for automated releases with the following configurat
 
 **Archives:**
 - Individual binaries for direct download (format: `{app}-darwin-{arch}`)
-- Combined tarball for Homebrew (format: `cache-cleaner-{version}-darwin-{arch}.tar.gz`)
+- Combined tarball for Homebrew (format: `bilge-{version}-darwin-{arch}.tar.gz`)
 - The tarball includes all three binaries
 
 **Homebrew Integration:**
-- Automatically generates formula in `markcallen/homebrew-cache-cleaner`
-- Formula installs all three binaries
+- Automatically generates a cask in `everydaydevopsio/homebrew-bilge-pump`
+- The cask installs all three binaries
 - Includes caveats with quick start instructions
 - Includes version tests for all binaries
 
@@ -500,9 +565,11 @@ The project uses GoReleaser for automated releases with the following configurat
 
 **Primary: Homebrew (Recommended)**
 ```bash
-brew tap markcallen/cache-cleaner
-brew install cache-cleaner
+brew tap everydaydevopsio/bilge-pump
+brew trust --cask everydaydevopsio/bilge-pump/bilge
+brew install --cask bilge
 ```
+Run the trust command before installing or upgrading this third-party cask.
 
 Benefits:
 - Automatic PATH configuration
@@ -514,10 +581,10 @@ Benefits:
 **Secondary: Direct Download**
 ```bash
 # Via install script (requires -b flag)
-curl -sSfL https://raw.githubusercontent.com/markcallen/cache-cleaner/HEAD/install.sh | sh -s -- -b $HOME/.local/bin
+curl -sSfL https://raw.githubusercontent.com/everydaydevopsio/bilge-pump/HEAD/install.sh | sh -s -- -b $HOME/.local/bin
 
 # Or download binaries directly from GitHub Releases
-# https://github.com/markcallen/cache-cleaner/releases
+# https://github.com/everydaydevopsio/bilge-pump/releases
 ```
 
 **install.sh Behavior:**
@@ -533,17 +600,17 @@ To enable automated Homebrew releases:
 
 1. **Create tap repository:**
    - Go to: https://github.com/new
-   - Repository name: `homebrew-cache-cleaner` (must start with `homebrew-`)
-   - Description: "Homebrew tap for cache-cleaner tools"
+   - Repository name: `homebrew-bilge-pump` (must start with `homebrew-`)
+   - Description: "Homebrew tap for bilge tools"
    - Visibility: Public
    - Initialize with README
-   - After creation, clone and create `Formula/` directory:
+   - After creation, clone and create `Casks/` directory:
      ```bash
-     git clone git@github.com:markcallen/homebrew-cache-cleaner.git
-     cd homebrew-cache-cleaner
-     mkdir Formula
-     git add Formula
-     git commit -m "Add Formula directory"
+     git clone git@github.com:everydaydevopsio/homebrew-bilge-pump.git
+     cd homebrew-bilge-pump
+     mkdir Casks
+     git add Casks
+     git commit -m "Add Casks directory"
      git push origin main
      ```
 
@@ -554,8 +621,8 @@ To enable automated Homebrew releases:
    - Scopes: Select `public_repo` (allows read/write to public repositories)
    - Click "Generate token"
    - **IMPORTANT**: Copy the token immediately (you won't see it again)
-   - Add as repository secret in the cache-cleaner repository:
-     - Go to: https://github.com/markcallen/cache-cleaner/settings/secrets/actions
+   - Add as repository secret in the bilge repository:
+     - Go to: https://github.com/everydaydevopsio/bilge-pump/settings/secrets/actions
      - Click "New repository secret"
      - Name: `HOMEBREW_TAP_GITHUB_TOKEN`
      - Value: Paste the token you copied
@@ -569,36 +636,37 @@ To enable automated Homebrew releases:
 4. **Test after first release:**
    ```bash
    # Add the tap and install
-   brew tap markcallen/cache-cleaner
-   brew install cache-cleaner --verbose
+   brew tap everydaydevopsio/bilge-pump
+   brew trust --cask everydaydevopsio/bilge-pump/bilge
+   brew install --cask bilge --verbose
 
    # Verify all binaries are installed
    which dev-cache
    which git-cleaner
-   which mac-cache-cleaner
+   which bilge-macos
 
    # Test functionality
    dev-cache --version
    git-cleaner --version
-   mac-cache-cleaner --version
+   bilge-macos --version
 
-   # Audit the formula
-   brew audit --strict --online cache-cleaner
+   # Audit the cask
+   brew audit --strict --online bilge
 
    # Test uninstall (optional)
-   brew uninstall cache-cleaner
-   brew untap markcallen/cache-cleaner
+   brew uninstall bilge
+   brew untap everydaydevopsio/bilge-pump
    ```
 
 ### Future: Migrating to Homebrew Core
 
-Once the formula is stable and has users, the project can be submitted to homebrew-core for wider distribution:
+Once the cask is stable and has users, the project can be submitted to homebrew-core for wider distribution:
 
 1. Review the [Homebrew contribution guidelines](https://docs.brew.sh/How-To-Open-a-Homebrew-Pull-Request)
-2. Ensure the formula passes `brew audit --strict --online`
+2. Ensure the cask passes `brew audit --strict --online`
 3. Submit a PR to [Homebrew/homebrew-core](https://github.com/Homebrew/homebrew-core)
 4. After acceptance, users can install with just:
    ```bash
-   brew install cache-cleaner
+   brew install bilge
    ```
    (no tap required)

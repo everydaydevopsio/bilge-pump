@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	yaml "gopkg.in/yaml.v3"
 )
 
 func TestCheckVersionFlag(t *testing.T) {
@@ -108,7 +112,7 @@ func TestExpandHome(t *testing.T) {
 
 func TestDefaultConfigPath(t *testing.T) {
 	p := defaultConfigPath()
-	if !strings.HasSuffix(p, filepath.Join(".config", "mac-cache-cleaner", "config.yaml")) {
+	if !strings.HasSuffix(p, filepath.Join(".config", "bilge-macos", "config.yaml")) {
 		t.Fatalf("defaultConfigPath() unexpected: %q", p)
 	}
 }
@@ -176,7 +180,7 @@ func TestCheckToolCheckPathWithTilde(t *testing.T) {
 		t.Skip("no home dir")
 	}
 	// Use a path that doesn't exist
-	tool := Tool{Name: "dummy", CheckPath: "~/.cache-cleaner-test-nonexistent-xyz"}
+	tool := Tool{Name: "dummy", CheckPath: "~/.bilge-test-nonexistent-xyz"}
 	installed, _, _ := checkTool(tool)
 	if installed {
 		t.Fatal("expected not installed for nonexistent path")
@@ -280,7 +284,7 @@ func TestMain_noArgs_summaryOnly(t *testing.T) {
 func TestRunVersion(t *testing.T) {
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"mac-cache-cleaner", "--version"}
+	os.Args = []string{"bilge-macos", "--version"}
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
@@ -299,6 +303,8 @@ func TestRunVersion(t *testing.T) {
 }
 
 func TestRunJSON(t *testing.T) {
+	oldJSON := *flagJSON
+	defer func() { *flagJSON = oldJSON }()
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
 	// Minimal config with one fast target to avoid docker scan
@@ -317,7 +323,7 @@ func TestRunJSON(t *testing.T) {
 
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"mac-cache-cleaner", "--config", cfgPath, "--json", "--targets", "test"}
+	os.Args = []string{"bilge-macos", "--config", cfgPath, "--json", "--targets", "test"}
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
@@ -332,6 +338,9 @@ func TestRunJSON(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte(`"dry_run"`)) {
 		t.Fatalf("expected JSON output, got: %s", out)
+	}
+	if !json.Valid(out) {
+		t.Fatalf("scan output is not valid JSON: %s", out)
 	}
 }
 
@@ -784,6 +793,128 @@ func TestExpandGlobsWithWildcards(t *testing.T) {
 	}
 	if len(paths) != 2 {
 		t.Fatalf("expandGlobs got %d paths, want 2: %v", len(paths), paths)
+	}
+}
+
+func TestLoadConfigUsesDefaultsWhenDefaultConfigIsMissing(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg, err := loadConfigWithDefaults(defaultConfigPath(), true)
+	if err != nil {
+		t.Fatalf("loadConfig(default path) failed on a fresh install: %v", err)
+	}
+	if cfg == nil || len(cfg.Targets) == 0 {
+		t.Fatal("default config has no targets")
+	}
+}
+
+func TestLoadConfigMigratesLegacyDefaultConfig(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("APPDATA", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
+	legacyPath := legacyDefaultConfigPath()
+	newPath := defaultConfigPath()
+	for _, path := range []string{legacyPath, newPath} {
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Fatalf("config path %q is outside temporary config root %q", path, root)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := Config{Version: 1, Targets: []Target{{Name: "docker", Enabled: false}}}
+	data, err := yaml.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectLegacyConfigInit(defaultConfigPath(), false); err == nil {
+		t.Fatal("initialization should refuse to replace existing legacy settings")
+	}
+
+	got, err := loadConfigWithDefaults(defaultConfigPath(), true)
+	if err != nil {
+		t.Fatalf("loadConfigWithDefaults: %v", err)
+	}
+	if len(got.Targets) != 1 || got.Targets[0].Name != "docker" || got.Targets[0].Enabled {
+		t.Fatalf("migrated targets = %#v, want disabled docker target", got.Targets)
+	}
+	info, err := os.Stat(defaultConfigPath())
+	if err != nil {
+		t.Fatalf("new config was not written: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("migrated config mode = %o, want owner-only permissions", info.Mode().Perm())
+	}
+}
+
+func TestLoadKeepsLegacyConfigWhenMigrationWriteFails(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("APPDATA", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
+	legacyPath := legacyDefaultConfigPath()
+	newPath := defaultConfigPath()
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := Config{Version: 1, Targets: []Target{{Name: "docker", Enabled: false}}}
+	data, err := yaml.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldCreateTemp := createMigrationTemp
+	createMigrationTemp = func(string, string) (*os.File, error) { return nil, errors.New("simulated disk error") }
+	defer func() { createMigrationTemp = oldCreateTemp }()
+
+	got, err := loadConfigWithDefaults(newPath, true)
+	if err != nil {
+		t.Fatalf("loadConfigWithDefaults: %v", err)
+	}
+	if len(got.Targets) != 1 || got.Targets[0].Enabled {
+		t.Fatalf("legacy settings were not retained: %#v", got.Targets)
+	}
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("failed migration left a destination config: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("legacy config was not preserved: %v", err)
+	}
+}
+
+func TestMigrateConfigFileDoesNotReplaceExistingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	want := []byte("user config")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateConfigFile(path, []byte("legacy config"), 0o600); err == nil {
+		t.Fatal("migration should not replace a config created concurrently")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("existing config = %q, want %q", got, want)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".bilge-config-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("migration left temporary files: %v", leftovers)
+	}
+}
+
+func TestLoadConfigRejectsExplicitMissingDefaultPath(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := loadConfigWithDefaults(defaultConfigPath(), false); err == nil {
+		t.Fatal("explicit missing default config path should fail")
 	}
 }
 

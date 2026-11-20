@@ -18,7 +18,7 @@ updates:
       - "dependencies"
       - "go"
   - package-ecosystem: "gomod"
-    directory: "/mac-cache-cleaner"
+    directory: "/bilge-macos"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10

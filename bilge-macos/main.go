@@ -20,10 +20,11 @@ import (
 
 // ----- Version info -----
 var (
-	version  = "dev"
-	commit   = "none"
-	date     = "unknown"
-	testMode = false // when true, checkTools returns instead of os.Exit
+	version             = "dev"
+	commit              = "none"
+	date                = "unknown"
+	testMode            = false // when true, checkTools returns instead of os.Exit
+	createMigrationTemp = os.CreateTemp
 )
 
 // ----- Command whitelist -----
@@ -68,12 +69,13 @@ var (
 func init() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
-		fmt.Fprintf(out, "Usage: mac-cache-cleaner [flags]\n\nFlags:\n")
+		if _, err := fmt.Fprintf(out, "Usage: bilge-macos [flags]\n\nFlags:\n"); err != nil {
+			return
+		}
 		flag.PrintDefaults()
-		fmt.Fprintf(out, "\nExamples:\n")
-		fmt.Fprintf(out, "  mac-cache-cleaner                         # Scan all targets (dry-run)\n")
-		fmt.Fprintf(out, "  mac-cache-cleaner --clean                 # Run cleanup commands\n")
-		fmt.Fprintf(out, "  mac-cache-cleaner --targets docker,npm    # Specific targets only\n")
+		if _, err := fmt.Fprintf(out, "\nExamples:\n  bilge-macos                         # Scan all targets (dry-run)\n  bilge-macos --clean                 # Run cleanup commands\n  bilge-macos --targets docker,npm    # Specific targets only\n"); err != nil {
+			return
+		}
 	}
 }
 
@@ -127,6 +129,7 @@ type Report struct {
 	OS       string                 `json:"os"`
 	Arch     string                 `json:"arch"`
 	DryRun   bool                   `json:"dry_run"`
+	Version  string                 `json:"version"`
 	When     time.Time              `json:"when"`
 	Totals   map[string]uint64      `json:"totals_by_target_bytes"`
 	Findings map[string][]Finding   `json:"findings"`
@@ -137,11 +140,73 @@ type Report struct {
 // ----- Utilities -----
 
 func defaultConfigPath() string {
+	return filepath.Join(configRoot(), "bilge-macos", "config.yaml")
+}
+
+func configRoot() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) && runtime.GOOS != "windows" {
+		return xdg
+	}
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+			return dir
+		}
+	}
 	h, _ := os.UserHomeDir()
 	if h == "" {
-		return "./config.yaml"
+		return "."
 	}
-	return filepath.Join(h, ".config", "mac-cache-cleaner", "config.yaml")
+	return filepath.Join(h, ".config")
+}
+
+func legacyDefaultConfigPath() string {
+	return filepath.Join(configRoot(), "mac-cache-cleaner", "config.yaml")
+}
+
+func rejectLegacyConfigInit(path string, force bool) error {
+	if force || filepath.Clean(path) != filepath.Clean(defaultConfigPath()) {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Stat(legacyDefaultConfigPath()); err == nil {
+		return fmt.Errorf("existing configuration found at %s; run a normal command to migrate it, or use --force to replace it", legacyDefaultConfigPath())
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func migrateConfigFile(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := createMigrationTemp(dir, ".bilge-config-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Link(tmpPath, path)
 }
 
 func ensureDir(p string) error { return os.MkdirAll(filepath.Dir(p), 0o755) }
@@ -466,31 +531,18 @@ func expandGlobs(pattern string) ([]string, error) {
 
 // ----- Config IO -----
 
-func writeStarterConfig(path string, force bool) error {
-	// Check if file exists
-	if _, err := os.Stat(path); err == nil {
-		if !force {
-			return fmt.Errorf("config file already exists at %s. Use --force to overwrite", path)
-		}
-		// Backup existing file with timestamp
-		backupPath := fmt.Sprintf("%s.%s", path, time.Now().Format("20060102-150405"))
-		if err := os.Rename(path, backupPath); err != nil {
-			return fmt.Errorf("failed to backup existing config: %w", err)
-		}
-		fmt.Printf("Existing config backed up to: %s\n", backupPath)
-	}
-
-	starter := Config{
+func defaultConfig() Config {
+	return Config{
 		Version: 1,
 		Options: Options{DockerPruneByDefault: false},
 		Targets: []Target{
-			{Name: "docker", Enabled: true, Notes: "Docker caches and images (safe CLI prune only)", Paths: []string{"~/Library/Caches/docker", "~/Library/Caches/buildx", "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"}, Cmds: [][]string{{"docker", "builder", "prune", "-af"}, {"docker", "system", "prune", "-af", "--volumes"}}, Tools: []Tool{{Name: "docker", InstallCmd: "brew install --cask docker"}}},
+			{Name: "docker", Enabled: true, Notes: "Docker caches and images; named volumes are preserved", Paths: []string{"~/Library/Caches/docker", "~/Library/Caches/buildx", "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"}, Cmds: [][]string{{"docker", "builder", "prune", "-af"}, {"docker", "system", "prune", "-af"}}, Tools: []Tool{{Name: "docker", InstallCmd: "brew install --cask docker"}}},
 			{Name: "brew", Enabled: true, Notes: "Homebrew cleanup (removes old packages and caches)", Paths: []string{"~/Library/Caches/Homebrew", "$(brew --cache)"}, Cmds: [][]string{{"brew", "cleanup", "-s"}, {"brew", "autoremove"}}, Tools: []Tool{{Name: "brew", InstallCmd: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""}}},
 			{Name: "npm", Enabled: true, Notes: "npm cache", Paths: []string{"~/.npm"}, Cmds: [][]string{{"npm", "cache", "clean", "--force"}}, Tools: []Tool{{Name: "npm", InstallCmd: "brew install node"}}},
 			{Name: "yarn", Enabled: true, Notes: "Global Yarn cache", Paths: []string{"~/Library/Caches/Yarn", "~/.yarn/cache"}, Cmds: [][]string{{"yarn", "cache", "clean"}}, Tools: []Tool{{Name: "yarn", InstallCmd: "brew install yarn"}}},
 			{Name: "pnpm", Enabled: true, Notes: "pnpm store and cache", Paths: []string{"~/.pnpm-store", "~/Library/Caches/pnpm"}, Cmds: [][]string{{"pnpm", "store", "prune"}}, Tools: []Tool{{Name: "pnpm", InstallCmd: "brew install pnpm"}}},
 			{Name: "node-versions", Enabled: true, Notes: "Node version manager (nvm)", Paths: []string{"~/.nvm/.cache"}, Cmds: [][]string{{"nvm", "cache", "clear"}}, Tools: []Tool{{Name: "nvm", InstallCmd: "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash", InstallNotes: "After installation, restart your terminal or run: source ~/.bashrc or source ~/.zshrc", CheckPath: "~/.nvm/nvm.sh"}}},
-			{Name: "expo", Enabled: true, Notes: "Expo and React Native caches", Paths: []string{"~/.expo", "~/.cache/expo"}, Cmds: [][]string{{"expo", "start", "-c"}}, Tools: []Tool{{Name: "expo", InstallCmd: "npm install -g expo-cli"}}},
+			{Name: "expo", Enabled: true, Notes: "Expo and React Native cache size (informational; expo start -c launches a server)", Paths: []string{"~/.expo", "~/.cache/expo"}, Cmds: [][]string{}, Tools: []Tool{{Name: "expo", InstallCmd: "npm install -g expo-cli"}}},
 			{Name: "go", Enabled: true, Notes: "Go build & module caches", Paths: []string{"~/Library/Caches/go-build", "$GOMODCACHE/cache", "$GOPATH/pkg/mod/cache"}, Cmds: [][]string{{"go", "clean", "-cache", "-testcache", "-modcache"}}, Tools: []Tool{{Name: "go", InstallCmd: "brew install go"}}},
 			{Name: "rust", Enabled: true, Notes: "Rust registry and build caches (requires cargo-cache: cargo install cargo-cache)", Paths: []string{"~/.cargo/registry", "~/.cargo/git"}, Cmds: [][]string{{"cargo", "cache", "-a"}}, Tools: []Tool{{Name: "cargo", InstallCmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"}, {Name: "cargo-cache", InstallCmd: "cargo install cargo-cache", InstallNotes: "Install this after cargo is installed"}}},
 			{Name: "python", Enabled: true, Notes: "pip and pipenv caches", Paths: []string{"~/.cache/pip", "~/Library/Caches/pip", "~/.local/share/virtualenvs"}, Cmds: [][]string{{"pip", "cache", "purge"}}, Tools: []Tool{{Name: "pip", InstallCmd: "brew install python", InstallNotes: "pip is included with Python installation"}}},
@@ -513,7 +565,7 @@ func writeStarterConfig(path string, force bool) error {
 			{Name: "android-studio", Enabled: true, Notes: "Android Studio IDE caches, logs, and indexes", Paths: []string{"~/Library/Caches/Google/AndroidStudio*", "~/Library/Logs/Google/AndroidStudio*", "~/Library/Application Support/Google/AndroidStudio*/system/caches", "~/Library/Application Support/Google/AndroidStudio*/system/index"}, Cmds: [][]string{}},
 			{Name: "terraform", Enabled: true, Notes: "Terraform plugin cache", Paths: []string{"~/.terraform.d/plugin-cache/"}, Cmds: [][]string{}, Tools: []Tool{{Name: "terraform", InstallCmd: "brew install terraform"}}},
 			{Name: "packer", Enabled: true, Notes: "Packer plugins directory", Paths: []string{"~/.packer.d/plugins"}, Cmds: [][]string{}, Tools: []Tool{{Name: "packer", InstallCmd: "brew install packer"}}},
-			{Name: "ollama", Enabled: true, Notes: "Ollama models and cache (uses official prune)", Paths: []string{"~/.ollama/models"}, Cmds: [][]string{{"ollama", "list"}}, Tools: []Tool{{Name: "ollama", InstallCmd: "brew install ollama"}}},
+			{Name: "ollama", Enabled: true, Notes: "Ollama models and cache (informational; models are not removed)", Paths: []string{"~/.ollama/models"}, Cmds: [][]string{}, Tools: []Tool{{Name: "ollama", InstallCmd: "brew install ollama"}}},
 			{Name: "home-cache", Enabled: true, Notes: "Top-level ~/.cache subdirectories (informational only)", Paths: []string{"~/.cache/*"}, Cmds: [][]string{}, Tools: []Tool{}},
 			{Name: "pyenv", Enabled: true, Notes: "Pyenv installed versions and downloads (informational)", Paths: []string{"~/.pyenv/versions", "~/.pyenv/cache", "~/.pyenv/plugins/python-build/share/python-build/cache"}, Cmds: [][]string{}, Tools: []Tool{{Name: "pyenv", InstallCmd: "brew install pyenv", InstallNotes: "Remove unused versions with: pyenv uninstall <version>"}}},
 			{Name: "rustup", Enabled: true, Notes: "Rustup toolchains and targets (informational)", Paths: []string{"~/.rustup/toolchains", "~/.rustup/tmp", "~/.rustup/downloads"}, Cmds: [][]string{}, Tools: []Tool{{Name: "rustup", InstallCmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh", InstallNotes: "List toolchains: rustup toolchain list; remove: rustup toolchain uninstall <name>"}}},
@@ -521,9 +573,26 @@ func writeStarterConfig(path string, force bool) error {
 			{Name: "rvm", Enabled: true, Notes: "RVM installed rubies and archives (informational)", Paths: []string{"~/.rvm/rubies", "~/.rvm/archives", "~/.rvm/src"}, Cmds: [][]string{{"rvm", "cleanup", "all"}}, Tools: []Tool{{Name: "rvm", InstallCmd: "curl -sSL https://get.rvm.io | bash", InstallNotes: "List rubies: rvm list; remove: rvm remove <ruby>"}}},
 			{Name: "dropbox", Enabled: true, Notes: "Dropbox metadata and state (informational only; no safe CLI clean)", Paths: []string{"~/.dropbox"}, Cmds: [][]string{}, Tools: []Tool{}},
 			{Name: "cursor", Enabled: true, Notes: "Cursor editor state and cache (informational)", Paths: []string{"~/.cursor"}, Cmds: [][]string{}, Tools: []Tool{}},
-			{Name: "puppeteer", Enabled: true, Notes: "Puppeteer cache", Paths: []string{"~/.cache/puppeteer"}, Cmds: [][]string{{"sh", "-c", "npm list -g puppeteer >/dev/null 2>&1 || npm install -g puppeteer; NODE_PATH=$(npm root -g) node -e \"const puppeteer = require('puppeteer'); puppeteer.default.trimCache().then(() => process.exit(0)).catch((e) => {console.error(e); process.exit(1);})\""}}, Tools: []Tool{{Name: "node", InstallCmd: "brew install node"}}},
+			{Name: "puppeteer", Enabled: true, Notes: "Puppeteer cache (informational; cleanup must not install packages)", Paths: []string{"~/.cache/puppeteer"}, Cmds: [][]string{}, Tools: []Tool{{Name: "node", InstallCmd: "brew install node"}}},
 		},
 	}
+}
+
+func writeStarterConfig(path string, force bool) error {
+	// Check if file exists
+	if _, err := os.Stat(path); err == nil {
+		if !force {
+			return fmt.Errorf("config file already exists at %s. Use --force to overwrite", path)
+		}
+		// Backup existing file with timestamp
+		backupPath := fmt.Sprintf("%s.%s", path, time.Now().Format("20060102-150405"))
+		if err := os.Rename(path, backupPath); err != nil {
+			return fmt.Errorf("failed to backup existing config: %w", err)
+		}
+		fmt.Printf("Existing config backed up to: %s\n", backupPath)
+	}
+
+	starter := defaultConfig()
 	if err := ensureDir(path); err != nil {
 		return err
 	}
@@ -535,15 +604,65 @@ func writeStarterConfig(path string, force bool) error {
 }
 
 func loadConfig(path string) (*Config, error) {
+	return loadConfigWithDefaults(path, true)
+}
+
+func loadConfigWithDefaults(path string, allowMissing bool) (*Config, error) {
 	b, err := os.ReadFile(path)
+	var cfg Config
 	if err != nil {
+		if allowMissing && os.IsNotExist(err) && filepath.Clean(path) == filepath.Clean(defaultConfigPath()) {
+			legacyPath := legacyDefaultConfigPath()
+			if legacy, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
+				if err := yaml.Unmarshal(legacy, &cfg); err != nil {
+					return nil, fmt.Errorf("parse legacy config %s: %w", legacyPath, err)
+				}
+				if err := migrateConfigFile(path, legacy, 0o600); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not copy migrated config to %s: %v\n", path, err)
+				} else {
+					fmt.Fprintf(os.Stderr, "Migrated configuration from %s to %s\n", legacyPath, path)
+				}
+			} else if !os.IsNotExist(legacyErr) {
+				return nil, fmt.Errorf("read legacy config %s: %w", legacyPath, legacyErr)
+			} else {
+				cfg = defaultConfig()
+			}
+		} else {
+			return nil, err
+		}
+	} else if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
-	var cfg Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return nil, err
+	// sdkmanager --update downloads data rather than reclaiming space.
+	for i := range cfg.Targets {
+		filtered := cfg.Targets[i].Cmds[:0]
+		for _, cmd := range cfg.Targets[i].Cmds {
+			if cfg.Targets[i].Name == "android" && len(cmd) == 2 && cmd[0] == "sdkmanager" && cmd[1] == "--update" {
+				continue
+			}
+			if cfg.Targets[i].Name == "expo" && len(cmd) >= 3 && cmd[0] == "expo" && cmd[1] == "start" && cmd[2] == "-c" {
+				continue
+			}
+			if cfg.Targets[i].Name == "puppeteer" && len(cmd) >= 2 && cmd[0] == "sh" && cmd[1] == "-c" {
+				continue
+			}
+			if cfg.Targets[i].Name == "docker" && !cfg.Options.DockerPruneByDefault && !*flagDockerPrune && containsArg(cmd, "--volumes") {
+				continue
+			}
+			filtered = append(filtered, cmd)
+		}
+		cfg.Targets[i].Cmds = filtered
 	}
 	return &cfg, nil
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ----- Tool checking -----
@@ -711,8 +830,12 @@ func populateCommands(targets []Target, rep *Report) {
 // runFirstScan scans all targets and populates rep.Findings. Returns beforeTotals map.
 func runFirstScan(targets []Target, rep *Report) map[string]uint64 {
 	beforeTotals := make(map[string]uint64)
+	progress := os.Stdout
+	if *flagJSON {
+		progress = os.Stderr
+	}
 	for _, t := range targets {
-		fmt.Printf("Scanning [%s]...", t.Name)
+		_, _ = fmt.Fprintf(progress, "Scanning [%s]...", t.Name)
 		var sum int64
 
 		if strings.ToLower(t.Name) == "docker" {
@@ -742,7 +865,7 @@ func runFirstScan(targets []Target, rep *Report) map[string]uint64 {
 			}
 		}
 		beforeTotals[t.Name] = uint64(sum)
-		fmt.Printf(" done (%s)\n", human(sum))
+		_, _ = fmt.Fprintf(progress, " done (%s)\n", human(sum))
 	}
 	return beforeTotals
 }
@@ -891,10 +1014,16 @@ func run() int {
 	}
 
 	flag.Parse()
+	configExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			configExplicit = true
+		}
+	})
 	// Detect if no command-line args were provided (program name only)
 	noArgs := len(os.Args) == 1
 	if *flagListTargets {
-		cfg, err := loadConfig(*flagConfig)
+		cfg, err := loadConfigWithDefaults(*flagConfig, !configExplicit)
 		if err != nil {
 			fmt.Println("config error:", err)
 			fmt.Println("Tip: run with --init to create a starter config")
@@ -916,6 +1045,10 @@ func run() int {
 	}
 
 	if *flagInit {
+		if err := rejectLegacyConfigInit(*flagConfig, *flagForce); err != nil {
+			fmt.Println("init error:", err)
+			return 1
+		}
 		if err := writeStarterConfig(*flagConfig, *flagForce); err != nil {
 			fmt.Println("init error:", err)
 			return 1
@@ -924,7 +1057,7 @@ func run() int {
 		return 0
 	}
 
-	cfg, err := loadConfig(*flagConfig)
+	cfg, err := loadConfigWithDefaults(*flagConfig, !configExplicit)
 	if err != nil {
 		fmt.Println("config error:", err)
 		fmt.Println("Tip: run with --init to create a starter config")
@@ -936,7 +1069,7 @@ func run() int {
 		return 0
 	}
 
-	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, When: time.Now(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
+	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, Version: version, When: time.Now(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
 	if h, _ := os.Hostname(); h != "" {
 		rep.Hostname = h
 	}
@@ -1089,10 +1222,15 @@ func run() int {
 	}
 
 	// Now run commands if --clean is specified
+	partialFailure := false
 	if *flagClean {
 		for _, t := range targets {
 			for _, c := range t.Cmds {
-				runCmd(c)
+				result := runCmd(c)
+				if result.Error != "" {
+					rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s: %s", strings.Join(c, " "), result.Error))
+					partialFailure = true
+				}
 			}
 		}
 
@@ -1213,6 +1351,9 @@ func run() int {
 		for _, w := range rep.Warnings {
 			fmt.Println(" -", w)
 		}
+	}
+	if *flagClean && partialFailure {
+		return 3
 	}
 	return 0
 }

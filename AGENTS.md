@@ -1,11 +1,13 @@
-# AGENTS.md - AI Agent Guidelines for cache-cleaner
+# AGENTS.md - AI Agent Guidelines for bilge
 
 ## Project Overview
 
-**cache-cleaner** is a Go monorepo with three CLI tools for reclaiming disk space:
+**bilge** is a cross-platform Go cleanup toolkit with a unified CLI and platform-specific task executables:
+- **bilge** - Orchestrates a full scan or cleanup, or a selected cleanup task
 - **dev-cache** - Cross-platform scanner for project cache directories (node_modules, .venv, target, etc.) with language detection; deletes caches with `--clean`
 - **git-cleaner** - Cross-platform; finds .git directories, reports sizes, optimizes with `git gc`; requires `--scan` (no config file)
-- **mac-cache-cleaner** - macOS-only; runs safe CLI cleanup commands for developer tools (Docker, npm, Homebrew, etc.)
+- **bilge-macos** - macOS cleanup tasks
+- **bilge-linux** and **bilge-windows** - Linux and native Windows cleanup tasks
 
 ## Build/Lint/Test Commands
 
@@ -19,7 +21,7 @@
 | `make vet` | Run `go vet` on all apps |
 | `make clean` | Clean all build artifacts |
 
-### Per-App Commands (from dev-cache/, git-cleaner/, mac-cache-cleaner/)
+### Per-App Commands (from dev-cache/, git-cleaner/, bilge-macos/)
 | Command | Description |
 |---------|-------------|
 | `make all` | fmt + lint + vet + build |
@@ -33,7 +35,7 @@
 ```bash
 cd dev-cache && go test -v -run TestHuman ./...
 cd git-cleaner && go test -v -run TestHumanSize ./...
-cd mac-cache-cleaner && go test -v -run TestRunWithRealCommands ./...
+cd bilge-macos && go test -v -run TestRunWithRealCommands ./...
 ```
 
 ## Code Style
@@ -76,7 +78,7 @@ var (
 Use both `yaml` and `json` tags; include `omitempty` for optional fields. Finding structs vary by app:
 - dev-cache: Path, ProjectRoot, SizeBytes, Items, Pattern, Language, Err, ModMax
 - git-cleaner: Path, RepoPath, SizeBytes, Items
-- mac-cache-cleaner: Path, SizeBytes, Items, Err, ModMax
+- bilge-macos: Path, SizeBytes, Items, Err, ModMax
 
 ### Error Handling
 ```go
@@ -125,11 +127,13 @@ func TestSomething(t *testing.T) {
 
 ## Project Structure
 ```
-cache-cleaner/
+bilge-pump/
 ├── dev-cache/             # Dev cache scanner
 │   ├── main.go, main_test.go, go.mod, Makefile
 ├── git-cleaner/           # Git repo optimizer (same structure)
-├── mac-cache-cleaner/     # macOS cleanup tool (same structure)
+├── bilge-macos/           # macOS cleanup tool (same structure)
+├── cmd/bilge/             # Unified command
+├── cmd/platform-bilge/    # Linux and Windows cleanup command
 ├── .github/workflows/     # CI/CD
 ├── .goreleaser.yaml       # Release config
 └── Makefile               # Root orchestration
@@ -139,9 +143,9 @@ cache-cleaner/
 
 1. **Dry-run by default** - Report without changes unless `--clean` is specified
 2. **Safety first** - Use official tool CLI commands, never direct `rm -rf`
-3. **Cross-platform paths** - Use `filepath.Join()`, `os.UserHomeDir()`. dev-cache and git-cleaner are cross-platform; mac-cache-cleaner is macOS-only
-4. **Config-driven** - dev-cache and mac-cache-cleaner use YAML config with `--init`; git-cleaner is flag-only (`--scan` required)
-5. **Consistent CLI** - Common flags: `--version`, `--help`, `--clean`. dev-cache and mac-cache-cleaner add `--config`, `--init`, `--json`; git-cleaner uses `--scan` only (no config)
+3. **Cross-platform paths** - Use `filepath.Join()`, `os.UserHomeDir()`. dev-cache and git-cleaner are cross-platform; bilge-macos is macOS-only
+4. **Config-driven** - dev-cache and bilge-macos use YAML config with `--init`; git-cleaner is flag-only (`--scan` required)
+5. **Consistent CLI** - Common flags: `--version`, `--help`, `--clean`. dev-cache and bilge-macos add `--config`, `--init`, `--json`; git-cleaner uses `--scan` only (no config)
 6. **Table output** - Use tablewriter for humans, JSON for automation
 7. **Error collection** - Collect errors but continue; report at end
 
@@ -171,7 +175,7 @@ dev-cache prompts before cleanup unless `--yes` is set.
 
 ## Code Coverage
 
-- **Minimum**: 60% statement coverage for all apps (dev-cache, git-cleaner, mac-cache-cleaner)
+- **Minimum**: 60% statement coverage for all apps (dev-cache, git-cleaner, bilge-macos)
 - Run coverage: `go test -cover ./...` from each app directory
 - Generate report: `go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out`
 

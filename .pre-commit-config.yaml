@@ -34,10 +34,10 @@ repos:
         stages: ["pre-commit"]
 
       - id: sub-pre-commit
-        alias: mac-cache-cleaner
-        name: "pre-commit for mac-cache-cleaner/"
-        args: ["-p", "mac-cache-cleaner"]
-        files: "^mac-cache-cleaner/.*"
+        alias: bilge-macos
+        name: "pre-commit for bilge-macos/"
+        args: ["-p", "bilge-macos"]
+        files: "^bilge-macos/.*"
         stages: ["pre-commit"]
 
   - repo: local

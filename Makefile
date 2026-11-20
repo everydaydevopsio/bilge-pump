@@ -1,8 +1,24 @@
 # Root Makefile - builds all applications
-.PHONY: all dev-cache git-cleaner mac-cache-cleaner clean test fmt lint vet build release-dry-run release-snapshot goreleaser-check check-tools help
+.PHONY: all dev-cache git-cleaner bilge-macos bilge bilge-linux bilge-windows clean test fmt lint vet build release-dry-run release-snapshot goreleaser-check check-tools help
+
+HOST_GOOS := $(shell go env GOOS)
+HOST_GOARCH := $(shell go env GOARCH)
+
+ifeq ($(HOST_GOOS),darwin)
+HOST_PLATFORM_CLEANER := bilge-macos
+HOST_BIN_SUFFIX :=
+else ifeq ($(HOST_GOOS),linux)
+HOST_PLATFORM_CLEANER := bilge-linux
+HOST_BIN_SUFFIX :=
+else ifeq ($(HOST_GOOS),windows)
+HOST_PLATFORM_CLEANER := bilge-windows
+HOST_BIN_SUFFIX := .exe
+else
+$(error Unsupported host OS: $(HOST_GOOS))
+endif
 
 # Default target - build all applications
-all: dev-cache git-cleaner mac-cache-cleaner
+all: dev-cache git-cleaner bilge-macos bilge bilge-linux bilge-windows
 
 # Help target
 help:
@@ -15,7 +31,10 @@ help:
 	@echo "  all                 - Build all applications (default)"
 	@echo "  dev-cache           - Build dev-cache application"
 	@echo "  git-cleaner         - Build git-cleaner application"
-	@echo "  mac-cache-cleaner   - Build mac-cache-cleaner application"
+	@echo "  bilge-macos   - Build bilge-macos application"
+	@echo "  bilge       - Build unified bilge command"
+	@echo "  bilge-linux - Build Linux cleanup tool"
+	@echo "  bilge-windows - Build Windows cleanup tool"
 	@echo "  build               - Build all applications"
 	@echo ""
 	@echo "Quality targets:"
@@ -41,46 +60,69 @@ git-cleaner:
 	@echo "Building git-cleaner..."
 	@$(MAKE) -C git-cleaner all
 
-mac-cache-cleaner:
-	@echo "Building mac-cache-cleaner..."
-	@$(MAKE) -C mac-cache-cleaner all
+bilge-macos:
+	@echo "Building bilge-macos..."
+	@$(MAKE) -C bilge-macos all
+
+bilge:
+	@mkdir -p build
+	@cd dev-cache && go build -o ../build/dev-cache$(HOST_BIN_SUFFIX) .
+	@cd git-cleaner && go build -o ../build/git-cleaner$(HOST_BIN_SUFFIX) .
+ifeq ($(HOST_GOOS),darwin)
+	@cd bilge-macos && go build -o ../build/bilge-macos .
+else
+	@GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) go build -o build/$(HOST_PLATFORM_CLEANER)$(HOST_BIN_SUFFIX) ./cmd/platform-bilge
+endif
+	@go build -o build/bilge$(HOST_BIN_SUFFIX) ./cmd/bilge
+
+bilge-linux:
+	@mkdir -p build/cross/linux/amd64
+	@GOOS=linux GOARCH=amd64 go build -o build/cross/linux/amd64/bilge-linux ./cmd/platform-bilge
+
+bilge-windows:
+	@mkdir -p build/cross/windows/amd64
+	@GOOS=windows GOARCH=amd64 go build -o build/cross/windows/amd64/bilge-windows.exe ./cmd/platform-bilge
 
 # Convenience targets that run in all directories
 test:
 	@echo "Running tests in all applications..."
 	@$(MAKE) -C dev-cache test
 	@$(MAKE) -C git-cleaner test
-	@$(MAKE) -C mac-cache-cleaner test
+	@$(MAKE) -C bilge-macos test
+	@go test ./cmd/...
+	@sh scripts/test-install.sh
 
 fmt:
 	@echo "Formatting all applications..."
 	@$(MAKE) -C dev-cache fmt
 	@$(MAKE) -C git-cleaner fmt
-	@$(MAKE) -C mac-cache-cleaner fmt
+	@$(MAKE) -C bilge-macos fmt
 
 lint:
 	@echo "Linting all applications..."
 	@$(MAKE) -C dev-cache lint
 	@$(MAKE) -C git-cleaner lint
-	@$(MAKE) -C mac-cache-cleaner lint
+	@$(MAKE) -C bilge-macos lint
 
 vet:
 	@echo "Running go vet on all applications..."
 	@$(MAKE) -C dev-cache vet
 	@$(MAKE) -C git-cleaner vet
-	@$(MAKE) -C mac-cache-cleaner vet
+	@$(MAKE) -C bilge-macos vet
 
 build:
 	@echo "Building all applications..."
 	@$(MAKE) -C dev-cache build
 	@$(MAKE) -C git-cleaner build
-	@$(MAKE) -C mac-cache-cleaner build
+	@$(MAKE) -C bilge-macos build
+	@$(MAKE) bilge bilge-linux bilge-windows
 
 clean:
 	@echo "Cleaning all applications..."
 	@$(MAKE) -C dev-cache clean
 	@$(MAKE) -C git-cleaner clean
-	@$(MAKE) -C mac-cache-cleaner clean
+	@$(MAKE) -C bilge-macos clean
+	@rm -rf build
 
 # Check required tools are installed
 check-tools:
@@ -147,4 +189,4 @@ release-snapshot: goreleaser-check
 	@echo ""
 	@echo "Snapshot built successfully!"
 	@echo "Binaries are in: ./dist/"
-	@ls -lh ./dist/ | grep -E "dev-cache|git-cleaner|mac-cache-cleaner"
+	@ls -lh ./dist/ | grep -E "dev-cache|git-cleaner|bilge-macos"

@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.go_version }}
           cache-dependency-path: ${{ inputs.app_name }}/go.sum
@@ -79,16 +79,16 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build -o build/${{ inputs.app_name }}-darwin-arm64 main.go
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.app_name }}-binaries
           path: ${{ inputs.app_name }}/build/*
           retention-days: 7
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          slug: markcallen/cache-cleaner
+          slug: everydaydevopsio/bilge-pump
           files: ${{ inputs.app_name }}/coverage.out
           flags: ${{ inputs.app_name }}
