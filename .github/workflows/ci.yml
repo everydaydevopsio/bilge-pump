@@ -48,6 +48,10 @@ jobs:
           test -z "$(gofmt -l cmd)"
       - name: Test unified CLI and platform cleaners
         run: go test ./cmd/...
+      - name: Test MCP stdio transport with built commands
+        run: |
+          make bilge
+          python3 scripts/test-mcp.py build/bilge
       - name: Cross-build unified and platform commands
         run: |
           set -eu

@@ -215,6 +215,21 @@ func runTask(task string, args []string, jsonMode bool) TaskResult {
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
+	return runWithAgentSetup(args, installAgentIntegrations)
+}
+
+func runWithAgentSetup(args []string, setupAgents func() error) int {
+	if len(args) > 0 && args[0] == "mcp" {
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "mcp does not accept arguments")
+			return 1
+		}
+		if err := serveMCP(os.Stdin, os.Stdout, executeMCPTool); err != nil {
+			fmt.Fprintln(os.Stderr, "mcp server:", err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && (args[0] == "--version" || args[0] == "-version" || args[0] == "version") {
 		fmt.Printf("version %s, commit %s, built at %s\n", version, commit, date)
 		return 0
@@ -291,11 +306,14 @@ func run(args []string) int {
 	}
 	args = commandArgs
 	if init {
-		if err := writeConfig(path, force); err != nil {
+		if err := initConfig(path, force); err != nil {
 			fmt.Fprintln(os.Stderr, "config error:", err)
 			return 1
 		}
-		fmt.Println("Starter config written to:", path)
+		if err := setupAgents(); err != nil {
+			fmt.Fprintln(os.Stderr, "agent setup:", err)
+			return 1
+		}
 		return 0
 	}
 	cfg, err := loadConfigWithDefaults(path, !configExplicit)
@@ -499,6 +517,7 @@ func usage() {
 	fmt.Println("bilge clean --all [flags]")
 	fmt.Println("bilge clean <task> [flags]")
 	fmt.Println("bilge <task> [flags]")
+	fmt.Println("bilge mcp                 # Start the local MCP server over stdio")
 	fmt.Println("\nTasks: dev-cache, git-cleaner, bilge-macos, bilge-linux, bilge-windows")
 	fmt.Println("Flags: --config PATH --init [--force] --json --yes")
 	fmt.Println("Examples:")
