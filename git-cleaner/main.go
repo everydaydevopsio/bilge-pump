@@ -103,6 +103,19 @@ func writeStarterConfig(path string, force bool) error {
 	return os.WriteFile(path, b, 0o600)
 }
 
+func init() {
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		if _, err := fmt.Fprintf(out, "Usage: git-cleaner --scan <directory> [flags]\n\nFlags:\n"); err != nil {
+			return
+		}
+		flag.PrintDefaults()
+		if _, err := fmt.Fprintf(out, "\nExamples:\n  git-cleaner --scan ~/src         # Scan for .git directories\n  git-cleaner --scan ~/src --clean # Optimize with git gc\n"); err != nil {
+			return
+		}
+	}
+}
+
 // ----- Finding types -----
 
 type Finding struct {

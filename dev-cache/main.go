@@ -47,6 +47,19 @@ var (
 	flagUnsafeClean = flag.Bool("unsafe-clean", false, "Allow deleting cache paths that are not ignored by Git (unsafe)")
 )
 
+func init() {
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		if _, err := fmt.Fprintf(out, "Usage: dev-cache [flags]\n\nFlags:\n"); err != nil {
+			return
+		}
+		flag.PrintDefaults()
+		if _, err := fmt.Fprintf(out, "\nExamples:\n  dev-cache                        # Scan default path from config\n  dev-cache --scan ~/projects      # Scan specific directory\n  dev-cache --clean --yes          # Clean without confirmation\n  dev-cache --languages node,rust  # Only node and rust caches\n"); err != nil {
+			return
+		}
+	}
+}
+
 // ----- Config types -----
 
 type Config struct {

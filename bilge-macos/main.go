@@ -66,6 +66,19 @@ var (
 	flagDetails     = flag.Bool("details", false, "Show detailed per-directory information")
 )
 
+func init() {
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		if _, err := fmt.Fprintf(out, "Usage: bilge-macos [flags]\n\nFlags:\n"); err != nil {
+			return
+		}
+		flag.PrintDefaults()
+		if _, err := fmt.Fprintf(out, "\nExamples:\n  bilge-macos                         # Scan all targets (dry-run)\n  bilge-macos --clean                 # Run cleanup commands\n  bilge-macos --targets docker,npm    # Specific targets only\n"); err != nil {
+			return
+		}
+	}
+}
+
 // ----- Config types -----
 
 type Config struct {
