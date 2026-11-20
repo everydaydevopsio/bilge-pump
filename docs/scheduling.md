@@ -7,10 +7,12 @@ Use the unified `bilge` command to schedule scans or cleanup during low-usage ho
 Weekly at 3:00 AM every Sunday:
 
 ```cron
+PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin
 0 3 * * 0 /absolute/path/to/bilge clean --all --yes >> "$HOME/bilge-cleanup.log" 2>&1
 ```
 
 Replace `/absolute/path/to/bilge` with the path returned by `command -v bilge`. The `--yes` flag skips the dev-cache confirmation prompt. Keep log redirection enabled for troubleshooting.
+Add directories for any user-installed cleanup tools to `PATH`; cron does not inherit your interactive shell's environment.
 
 On macOS, prefer `launchd`; cron is supported but Apple recommends `launchd` for timed jobs.
 
@@ -33,6 +35,12 @@ Find the installed executable with `command -v bilge`, then create `~/Library/La
     <string>--all</string>
     <string>--yes</string>
   </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
 
   <key>StartCalendarInterval</key>
   <dict>
@@ -58,6 +66,8 @@ Load and start:
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.bilge.weekly.plist
 launchctl kickstart "gui/$(id -u)/com.bilge.weekly"
 ```
+
+Add directories for any user-installed cleanup tools to the `PATH` in the plist. LaunchAgents do not inherit your interactive shell's environment.
 
 Unload:
 
