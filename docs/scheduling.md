@@ -29,7 +29,7 @@ Find the installed executable with `command -v bilge`, then create `~/Library/La
   <key>ProgramArguments</key>
   <array>
     <string>/absolute/path/to/bilge</string>
-    <string>--clean</string>
+    <string>clean</string>
     <string>--all</string>
     <string>--yes</string>
   </array>
