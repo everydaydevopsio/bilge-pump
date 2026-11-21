@@ -12,6 +12,7 @@ Bilge is a cross-platform Go toolkit for reclaiming disk space by identifying an
 - Selective filtering for targeted operations
 - JSON output for automation/CI integration
 - A single `bilge` executable that runs the full platform-appropriate cleanup or selected cleanup tasks
+- A local MCP interface for the unified scan and cleanup capabilities, usable by Codex and Claude Code
 - The public command, release archive prefix, installer selection, and Homebrew cask use the name `bilge` beginning with v2.1.0.
 - Configuration stored under the XDG Base Directory Specification on Unix-like systems, honoring `XDG_CONFIG_HOME`
 
@@ -52,6 +53,12 @@ Ship one unified `bilge` command for macOS, Linux, and Windows. The release bund
 - Platform cleaner scans report filesystem inspection failures and return a partial-failure exit code; nonexistent optional cache paths are omitted without error.
 - macOS Homebrew post-install handling removes quarantine from the unified launcher as well as its bundled task executables.
 - Docker cleanup preserves named volumes by default; Android SDK updates and commands that install software or start services are excluded from cleanup defaults.
+
+### MCP and agent setup
+- `bilge mcp` serves the existing task capabilities over local stdio, without a network listener or separate release binary. It exposes dry-run scanning, explicit cleanup, platform target discovery, and macOS dependency checks.
+- MCP cleanup requires an explicit confirmation argument and retains the CLI's project-cache Git safety rules. The server never treats a scan as cleanup authorization. Its child processes have bounded execution time and output.
+- `bilge --init` installs a `bilge` MCP registration in available Codex and Claude Code CLIs and installs a disk-savings skill for both. Re-running init preserves an existing Bilge config, existing MCP registrations, and edited skill files so upgrades can complete agent setup without overwriting user work.
+- The disk-savings skill uses the MCP scan tools for low-disk investigations, distinguishes estimated savings from command-only targets, requests authorization before cleanup, and measures again afterward.
 
 ---
 

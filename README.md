@@ -65,7 +65,7 @@ Download and run [`install.ps1`](install.ps1) from PowerShell:
 
 It installs the Windows executables under `%LOCALAPPDATA%\Programs\bilge`. Add that directory to your user `PATH`.
 
-The release includes the unified command plus the platform tasks in the same directory. Run `bilge --init` once to create the editable unified config; platform cleaner configs can be initialized with `bilge-linux --init` or `bilge-windows --init`.
+The release includes the unified command plus the platform tasks in the same directory. Run `bilge --init` to create the editable unified config and set up the Bilge MCP server and disk-savings skill in installed Codex and Claude CLIs. Running it again preserves an existing config and agent registrations. Platform cleaner configs can be initialized with `bilge-linux --init` or `bilge-windows --init`.
 
 ### Alternative: Direct Download
 
@@ -108,6 +108,25 @@ bilge --json scan           # shared JSON envelope
 ```
 
 The unified config lives at `$XDG_CONFIG_HOME/bilge-pump/config.yaml` when `XDG_CONFIG_HOME` is set, otherwise under `~/.config/bilge-pump/` on macOS/Linux or the Windows user config directory. It selects a default scan path and task list. Each task can also be configured with its standalone tool's config file. The platform cleaner YAML exposes target `enabled`, `paths`, and `cmds` entries. `git-cleaner --init` creates its own config and supports `--config` and `--scan` overrides.
+
+### MCP server and disk-savings skill
+
+`bilge mcp` runs a local MCP server over stdio. It wraps the installed Bilge task executables; no network listener or separate binary is needed. After installing Bilge, run:
+
+```bash
+bilge --init
+```
+
+This registers the current `bilge` executable as an MCP server named `bilge` in Codex and Claude Code when their CLIs are installed. It also installs the `bilge-disk-savings` skill to `~/.codex/skills/` and `~/.claude/skills/`. On Windows these directories are under the user home directory. The registration uses the stable Homebrew `bin/bilge` symlink when available. Restart an existing agent session to pick up the new server and skill. If either CLI is missing, Bilge reports that registration was skipped; install the CLI and run `bilge --init` again. Existing MCP registrations and edited skill files are preserved.
+
+| MCP tool | Purpose |
+| --- | --- |
+| `bilge_scan` | Dry-run all tasks or one of `dev-cache`, `git-cleaner`, or `system`. Supports the corresponding scan path, target, language, depth, path, and age filters. |
+| `bilge_clean` | Run the same selected cleanup, with `confirm=true` after user authorization. Project-cache confirmation is supplied non-interactively. `unsafe_clean=true` bypasses the Git safety check and needs separate authorization. |
+| `bilge_list_targets` | List enabled and disabled targets for the current OS cleaner. |
+| `bilge_check_tools` | Check command dependencies for macOS cleaner targets; advertised only on macOS. |
+
+The skill uses scans to rank measured cache sizes when disk space is tight, asks before cleanup, and scans again afterward. System commands such as Docker prune may free space that Bilge cannot estimate from directory sizes. The server caps command output and execution time and returns an error for oversized or timed-out scans; narrow the scope and retry if needed.
 
 ### bilge-macos
 ```bash
