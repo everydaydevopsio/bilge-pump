@@ -314,6 +314,7 @@ func run() int {
 	init := flag.Bool("init", false, "Write starter config and exit")
 	force := flag.Bool("force", false, "Overwrite config when used with --init")
 	jsonOut := flag.Bool("json", false, "Output JSON report")
+	listTargets := flag.Bool("list-targets", false, "List configured targets and exit")
 	targetsArg := flag.String("targets", "all", "Comma-separated target names or all")
 	config := flag.String("config", configPath(), "Config YAML path")
 	flag.Parse()
@@ -364,6 +365,16 @@ func run() int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		return 1
+	}
+	if *listTargets {
+		for _, target := range cfg.Targets {
+			status := "DISABLED"
+			if target.Enabled {
+				status = "ENABLED"
+			}
+			fmt.Printf("%s [%s] %s\n", target.Name, status, target.Notes)
+		}
+		return 0
 	}
 	selected, err := selectTargets(*targetsArg, cfg)
 	if err != nil {
