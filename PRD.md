@@ -466,23 +466,10 @@ make release-snapshot
 
 ### Creating a Release
 
-1. **Ensure all changes are committed and pushed**
-   ```bash
-   git status
-   git add .
-   git commit -m "Prepare release v1.0.0"
-   git push origin main
-   ```
-
-2. **Create and push a version tag**
-   ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
-
-3. **GitHub Actions automatically:**
-   - Validates GoReleaser configuration
-   - Builds all 6 binaries (3 apps × 2 architectures)
+1. Merge changes to `main` and wait for CI to pass on that merge commit.
+2. Dispatch GitHub Actions **Publish** on `main` and select patch, minor, or major. The workflow checks the exact commit's CI result, rejects a moving main branch or existing version tag, then creates the next semver tag. Do not push release tags manually.
+3. GoReleaser automatically:
+   - Builds the unified CLI and task executables for supported Linux, macOS, and Windows architectures
    - Creates GitHub release with:
      - Individual binaries for direct download
      - Combined tarballs for Homebrew
@@ -491,7 +478,7 @@ make release-snapshot
    - Updates the Homebrew cask in `everydaydevopsio/homebrew-bilge-pump`
    - Commits cask changes with proper checksums
 
-4. **Verify the release:**
+4. Publish checks release assets and platform-specific cask links. Verify the installed version:
    - Check GitHub Releases: https://github.com/everydaydevopsio/bilge-pump/releases
    - Check Homebrew cask: https://github.com/everydaydevopsio/homebrew-bilge-pump/tree/main/Casks
    - Trust and test installation:
@@ -537,7 +524,7 @@ If you see authentication errors in the release workflow:
 If users report checksum errors:
 
 1. The cask might be out of sync with the release
-2. Re-run the release workflow or manually update checksums
+2. Investigate the failed Publish run and the generated cask before any retry
 3. Check that GoReleaser successfully updated the tap
 4. Verify the cask at: https://github.com/everydaydevopsio/homebrew-bilge-pump/tree/main/Casks
 
@@ -636,8 +623,8 @@ To enable automated Homebrew releases:
      - Click "Add secret"
 
 3. **Verify workflow:**
-   - GitHub Actions workflow is in `.github/workflows/release.yml`
-   - Uses `goreleaser/goreleaser-action@v6`
+   - GitHub Actions workflow is in `.github/workflows/publish.yml`
+   - Uses `goreleaser/goreleaser-action@v7`
    - Requires Go 1.22.x
 
 4. **Test after first release:**

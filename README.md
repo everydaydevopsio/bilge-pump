@@ -1,7 +1,7 @@
 # bilge
 
 [![CI](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml)
-[![Release](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml)
+[![Release](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/publish.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/publish.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/everydaydevopsio/bilge-pump?filename=dev-cache%2Fgo.mod)](https://go.dev/)
 [![License](https://img.shields.io/github/license/everydaydevopsio/bilge-pump)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/everydaydevopsio/bilge-pump)](https://github.com/everydaydevopsio/bilge-pump/releases)
@@ -235,12 +235,7 @@ make vet
 
 **How to trigger a release**
 
-Releases are triggered by pushing a version tag matching `vX.Y.Z` (e.g. `v1.0.0`, `v2.3.1`):
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
+After CI passes on `main`, open GitHub Actions → **Publish**, select **Run workflow** on `main`, and choose patch, minor, or major. Publish checks that CI passed on that exact commit, calculates the next version tag, and publishes through GoReleaser. If `main` moves before tagging, dispatch Publish again. Do not push release tags manually.
 
 **Prerequisites**
 
@@ -249,14 +244,14 @@ git push origin v1.0.0
 
 **What should happen:**
 
-1. GitHub Actions will trigger the release workflow
+1. Publish validates the current main commit and creates its version tag
 2. GoReleaser will:
-   - Build all 3 binaries for darwin/amd64 and darwin/arm64
+   - Build the unified CLI and task executables for supported Linux, macOS, and Windows architectures
    - Create a GitHub release with binaries attached
    - Generate a Homebrew cask
    - Push the cask to `homebrew-bilge-pump` repository
 
-3. Check the results:
+3. Publish verifies release assets and the platform-specific Homebrew cask links. Check the results:
    - Release: https://github.com/everydaydevopsio/bilge-pump/releases
    - Cask: https://github.com/everydaydevopsio/homebrew-bilge-pump/tree/main/Casks
    - Actions log: https://github.com/everydaydevopsio/bilge-pump/actions

@@ -1,0 +1,187 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Release type
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bilge-publish
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require main and successful CI for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE_REF" != refs/heads/main ]; then
+            echo "::error::Publish must be dispatched on main" >&2
+            exit 1
+          fi
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$RELEASE_SHA" --limit 20 --json headSha,status,conclusion)
+          if ! jq -e --arg sha "$RELEASE_SHA" 'any(.[]; .headSha == $sha and .status == "completed" and .conclusion == "success")' <<< "$runs" >/dev/null; then
+            echo "::error::CI has not succeeded for $RELEASE_SHA; no tag was created" >&2
+            exit 1
+          fi
+          echo "Validated CI for $RELEASE_SHA"
+
+  bump_and_tag:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout validated commit with tags
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Select next unused version
+        id: version
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main --tags
+          # A full-workflow retry keeps github.run_id. Reuse its tag instead of
+          # advancing the version a second time after a publish failure. This
+          # also works if main moved after the original tag was created.
+          for candidate in $(git tag --list 'v*' --points-at "$RELEASE_SHA"); do
+            if git cat-file -p "refs/tags/$candidate" | grep -Fqx "Publish run: $RELEASE_RUN_ID"; then
+              echo "tag=$candidate" >> "$GITHUB_OUTPUT"
+              echo "reuse=true" >> "$GITHUB_OUTPUT"
+              echo "Reusing $candidate from Publish run $RELEASE_RUN_ID"
+              exit 0
+            fi
+          done
+          if [ "$(git rev-parse origin/main)" != "$RELEASE_SHA" ]; then
+            echo "::error::main moved since validation; dispatch Publish again" >&2
+            exit 1
+          fi
+          latest=$(git tag --list 'v*' | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
+          latest=${latest:-v0.0.0}
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          case "$RELEASE_TYPE" in
+            patch) patch=$((patch + 1)) ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            *) echo "::error::Invalid release type: $RELEASE_TYPE" >&2; exit 1 ;;
+          esac
+          tag="v${major}.${minor}.${patch}"
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            echo "::error::Tag $tag already exists" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Selected release $tag from $latest at $RELEASE_SHA"
+
+      - name: Tag validated commit
+        if: steps.version.outputs.reuse != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$RELEASE_SHA" ]; then
+            echo "::error::main moved before tagging; dispatch Publish again" >&2
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" "$RELEASE_SHA" -m "Release $TAG" -m "Publish run: $RELEASE_RUN_ID"
+          git push origin "refs/tags/$TAG"
+
+  publish:
+    needs: bump_and_tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.bump_and_tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag resolves to validated commit
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          TAG: ${{ needs.bump_and_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          echo "Publishing $TAG from $RELEASE_SHA"
+
+      - name: Reject publication of a superseded release
+        env:
+          TAG: ${{ needs.bump_and_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin --tags
+          latest=$(git tag --list 'v*' | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
+          if [ "$TAG" != "$latest" ]; then
+            echo "::error::$TAG is superseded by $latest; refusing to overwrite release or Homebrew cask metadata" >&2
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.22.x'
+          cache-dependency-path: |
+            dev-cache/go.sum
+            git-cleaner/go.sum
+            bilge-macos/go.sum
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ needs.bump_and_tag.outputs.tag }}
+
+      - name: Verify release assets and Homebrew cask
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.bump_and_tag.outputs.tag }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name]')
+          jq -e 'any(.[]; test("linux-amd64")) and any(.[]; test("darwin-arm64")) and any(.[]; test("windows-amd64")) and any(.[]; . == "checksums.txt")' <<< "$assets" >/dev/null
+          cask=$(GH_TOKEN="$HOMEBREW_TAP_GITHUB_TOKEN" gh api repos/everydaydevopsio/homebrew-bilge-pump/contents/Casks/bilge.rb -H 'Accept: application/vnd.github.raw+json')
+          grep -Fq "version \"${TAG#v}\"" <<< "$cask"
+          grep -Fq 'binary "bilge-linux"' <<< "$cask"
+          grep -Fq 'binary "bilge-macos"' <<< "$cask"
+          echo "Verified release assets and platform-specific cask links for $TAG"
