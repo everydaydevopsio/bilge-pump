@@ -64,6 +64,7 @@ jobs:
         env:
           RELEASE_TYPE: ${{ inputs.release_type }}
           RELEASE_SHA: ${{ github.sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           git fetch --force origin main --tags
@@ -71,6 +72,16 @@ jobs:
             echo "::error::main moved since validation; dispatch Publish again" >&2
             exit 1
           fi
+          # A full-workflow retry keeps github.run_id. Reuse its tag instead of
+          # advancing the version a second time after a publish failure.
+          for candidate in $(git tag --list 'v*' --points-at "$RELEASE_SHA"); do
+            if git cat-file -p "refs/tags/$candidate" | grep -Fqx "Publish run: $RELEASE_RUN_ID"; then
+              echo "tag=$candidate" >> "$GITHUB_OUTPUT"
+              echo "reuse=true" >> "$GITHUB_OUTPUT"
+              echo "Reusing $candidate from Publish run $RELEASE_RUN_ID"
+              exit 0
+            fi
+          done
           latest=$(git tag --list 'v*' | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
           latest=${latest:-v0.0.0}
           IFS=. read -r major minor patch <<< "${latest#v}"
@@ -89,9 +100,11 @@ jobs:
           echo "Selected release $tag from $latest at $RELEASE_SHA"
 
       - name: Tag validated commit
+        if: steps.version.outputs.reuse != 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
           RELEASE_SHA: ${{ github.sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           git fetch origin main
@@ -101,7 +114,7 @@ jobs:
           fi
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git tag -a "$TAG" "$RELEASE_SHA" -m "Release $TAG"
+          git tag -a "$TAG" "$RELEASE_SHA" -m "Release $TAG" -m "Publish run: $RELEASE_RUN_ID"
           git push origin "refs/tags/$TAG"
 
   publish:
@@ -143,6 +156,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ needs.bump_and_tag.outputs.tag }}
 
       - name: Verify release assets and Homebrew cask
         env:

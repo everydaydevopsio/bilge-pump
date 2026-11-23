@@ -1,7 +1,7 @@
 # git-cleaner
 
 [![CI](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/ci.yml)
-[![Release](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/release.yml)
+[![Release](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/publish.yml/badge.svg)](https://github.com/everydaydevopsio/bilge-pump/actions/workflows/publish.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/everydaydevopsio/bilge-pump?filename=dev-cache%2Fgo.mod)](https://go.dev/)
 [![License](https://img.shields.io/github/license/everydaydevopsio/bilge-pump)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/everydaydevopsio/bilge-pump)](https://github.com/everydaydevopsio/bilge-pump/releases)

@@ -184,5 +184,5 @@ dev-cache prompts before cleanup unless `--yes` is set.
 - **Pull requests**: When creating a PR, always assign Copilot as a reviewer (e.g. via GitHub MCP `request_copilot_review`).
 - **Tests before push**: Run `make test` before pushing to remote. All tests must pass before pushing.
 - **CI**: On push/PR to main - lint, vet, fmt check, tests with coverage, builds for linux/darwin amd64+arm64; uploads to Codecov
-- **Release**: On version tags (v1.0.0) - GoReleaser builds releases
+- **Release**: After CI passes on main, dispatch the Publish GitHub workflow with patch, minor, or major. It creates the tag and runs GoReleaser; do not push release tags manually.
 - **Pre-commit**: Root delegates to per-app hooks (sub-pre-commit). Per-app: go-fmt, go-vet-mod, go-mod-tidy, golangci-lint-mod, go-test-mod (TekWizely/pre-commit-golang)
