@@ -68,12 +68,9 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force origin main --tags
-          if [ "$(git rev-parse origin/main)" != "$RELEASE_SHA" ]; then
-            echo "::error::main moved since validation; dispatch Publish again" >&2
-            exit 1
-          fi
           # A full-workflow retry keeps github.run_id. Reuse its tag instead of
-          # advancing the version a second time after a publish failure.
+          # advancing the version a second time after a publish failure. This
+          # also works if main moved after the original tag was created.
           for candidate in $(git tag --list 'v*' --points-at "$RELEASE_SHA"); do
             if git cat-file -p "refs/tags/$candidate" | grep -Fqx "Publish run: $RELEASE_RUN_ID"; then
               echo "tag=$candidate" >> "$GITHUB_OUTPUT"
@@ -82,6 +79,10 @@ jobs:
               exit 0
             fi
           done
+          if [ "$(git rev-parse origin/main)" != "$RELEASE_SHA" ]; then
+            echo "::error::main moved since validation; dispatch Publish again" >&2
+            exit 1
+          fi
           latest=$(git tag --list 'v*' | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
           latest=${latest:-v0.0.0}
           IFS=. read -r major minor patch <<< "${latest#v}"
@@ -137,6 +138,18 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           echo "Publishing $TAG from $RELEASE_SHA"
+
+      - name: Reject publication of a superseded release
+        env:
+          TAG: ${{ needs.bump_and_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin --tags
+          latest=$(git tag --list 'v*' | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
+          if [ "$TAG" != "$latest" ]; then
+            echo "::error::$TAG is superseded by $latest; refusing to overwrite release or Homebrew cask metadata" >&2
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v7
