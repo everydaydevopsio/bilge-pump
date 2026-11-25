@@ -97,6 +97,9 @@ type Finding struct {
 	Language    string    `json:"language"`
 	Err         string    `json:"error,omitempty"`
 	ModMax      time.Time `json:"latest_mtime"`
+	// SkipReason is set when the Git safety check would refuse to delete this
+	// cache; clean prints the same reason. Skipped bytes are not in Total.
+	SkipReason string `json:"skip_reason,omitempty"`
 }
 
 type Report struct {
@@ -109,8 +112,10 @@ type Report struct {
 	ScanPath string    `json:"scan_path"`
 	MaxDepth int       `json:"max_depth"`
 	Total    int64     `json:"total_bytes"`
-	Findings []Finding `json:"findings"`
-	Warnings []string  `json:"warnings"`
+	// SkippedBytes is the size of caches the Git safety check refuses.
+	SkippedBytes int64     `json:"skipped_bytes"`
+	Findings     []Finding `json:"findings"`
+	Warnings     []string  `json:"warnings"`
 }
 
 type ScanFilters struct {
@@ -998,10 +1003,17 @@ func main() {
 		_, _ = fmt.Fprintln(progress, "Language detection enabled - scanning with language-specific patterns")
 	}
 	findings := scanDirectory(scanPath, maxDepth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns, filters)
+	if !*flagUnsafeClean {
+		markUnsafeFindings(findings)
+	}
 	rep.Findings = findings
 
 	var total int64
 	for _, f := range findings {
+		if f.SkipReason != "" {
+			rep.SkippedBytes += f.SizeBytes
+			continue
+		}
 		total += f.SizeBytes
 	}
 	rep.Total = total
@@ -1028,6 +1040,7 @@ func main() {
 
 	// Display results
 	displayDetailed(findings, total)
+	displaySkipped(findings)
 
 	partialFailure := false
 	// Cleanup if requested
@@ -1048,12 +1061,9 @@ func main() {
 				return sortedFindings[i].SizeBytes > sortedFindings[j].SizeBytes
 			})
 			for _, f := range sortedFindings {
-				if !*flagUnsafeClean {
-					allowed, reason := safeCachePath(f)
-					if !allowed {
-						fmt.Printf("  - SKIP %s (%s)\n", f.Path, reason)
-						continue
-					}
+				if f.SkipReason != "" {
+					fmt.Printf("  - SKIP %s (%s)\n", f.Path, f.SkipReason)
+					continue
 				}
 				fmt.Printf("  - %s (%s)\n", f.Path, human(f.SizeBytes))
 			}
@@ -1136,6 +1146,38 @@ func main() {
 	}
 	if partialFailure {
 		os.Exit(3)
+	}
+}
+
+// markUnsafeFindings applies the clean-time Git safety check during the scan,
+// so a dry run reports the caches clean would refuse. Clean still rechecks
+// each path right before deleting it.
+func markUnsafeFindings(findings []Finding) {
+	for i := range findings {
+		if !isCacheDirectory(findings[i]) || findings[i].Err != "" {
+			continue
+		}
+		if allowed, reason := safeCachePath(findings[i]); !allowed {
+			findings[i].SkipReason = reason
+		}
+	}
+}
+
+// displaySkipped lists caches the Git safety check refuses.
+func displaySkipped(findings []Finding) {
+	var skipped []Finding
+	for _, f := range findings {
+		if f.SkipReason != "" {
+			skipped = append(skipped, f)
+		}
+	}
+	if len(skipped) == 0 {
+		return
+	}
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].SizeBytes > skipped[j].SizeBytes })
+	fmt.Printf("\nSkipped by the Git safety check (not counted in TOTAL):\n")
+	for _, f := range skipped {
+		fmt.Printf("  - SKIP %s, %s (%s)\n", f.Path, human(f.SizeBytes), f.SkipReason)
 	}
 }
 
@@ -1704,7 +1746,7 @@ func displayDetailed(findings []Finding, total int64) {
 	// First pass: identify which projects have actual cache directories
 	projectsWithCache := make(map[string]bool)
 	for _, f := range findings {
-		if f.Err != "" {
+		if f.Err != "" || f.SkipReason != "" {
 			continue
 		}
 		if isCacheDirectory(f) {
@@ -1721,7 +1763,7 @@ func displayDetailed(findings []Finding, total int64) {
 	projectGroups := make(map[string]map[string]*cacheTypeSummary)
 
 	for _, f := range findings {
-		if f.Err != "" {
+		if f.Err != "" || f.SkipReason != "" {
 			continue
 		}
 		// Use ProjectRoot if available, otherwise fall back to Path
