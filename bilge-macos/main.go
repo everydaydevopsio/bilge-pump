@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -545,7 +546,7 @@ func defaultConfig() Config {
 			{Name: "expo", Enabled: true, Notes: "Expo and React Native cache size (informational; expo start -c launches a server)", Paths: []string{"~/.expo", "~/.cache/expo"}, Cmds: [][]string{}, Tools: []Tool{{Name: "expo", InstallCmd: "npm install -g expo-cli"}}},
 			{Name: "go", Enabled: true, Notes: "Go build & module caches", Paths: []string{"~/Library/Caches/go-build", "$GOMODCACHE/cache", "$GOPATH/pkg/mod/cache"}, Cmds: [][]string{{"go", "clean", "-cache", "-testcache", "-modcache"}}, Tools: []Tool{{Name: "go", InstallCmd: "brew install go"}}},
 			{Name: "rust", Enabled: true, Notes: "Rust registry and build caches (requires cargo-cache: cargo install cargo-cache)", Paths: []string{"~/.cargo/registry", "~/.cargo/git"}, Cmds: [][]string{{"cargo", "cache", "-a"}}, Tools: []Tool{{Name: "cargo", InstallCmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"}, {Name: "cargo-cache", InstallCmd: "cargo install cargo-cache", InstallNotes: "Install this after cargo is installed"}}},
-			{Name: "python", Enabled: true, Notes: "pip and pipenv caches", Paths: []string{"~/.cache/pip", "~/Library/Caches/pip", "~/.local/share/virtualenvs"}, Cmds: [][]string{{"pip", "cache", "purge"}}, Tools: []Tool{{Name: "pip", InstallCmd: "brew install python", InstallNotes: "pip is included with Python installation"}}},
+			{Name: "python", Enabled: true, Notes: "pip and pipenv caches", Paths: []string{"~/.cache/pip", "~/Library/Caches/pip", "~/.local/share/virtualenvs"}, Cmds: [][]string{{"python3", "-m", "pip", "cache", "purge"}}, Tools: []Tool{{Name: "python3", InstallCmd: "brew install python", InstallNotes: "pip 20.1+ is included with Python 3 installation"}}},
 			{Name: "python-poetry", Enabled: true, Notes: "Poetry package manager cache", Paths: []string{"~/Library/Caches/pypoetry"}, Cmds: [][]string{{"poetry", "cache", "clear", "--all", "pypi"}}, Tools: []Tool{{Name: "poetry", InstallCmd: "brew install poetry"}}},
 			{Name: "python-uv", Enabled: true, Notes: "uv Python package installer cache", Paths: []string{"~/.cache/uv"}, Cmds: [][]string{{"uv", "cache", "clean"}}, Tools: []Tool{{Name: "uv", InstallCmd: "curl -LsSf https://astral.sh/uv/install.sh | sh", InstallNotes: "uv is a fast Python package installer"}}},
 			{Name: "conda", Enabled: true, Notes: "Conda package and cache cleanup", Paths: []string{"~/.conda/pkgs", "~/.conda/envs"}, Cmds: [][]string{{"conda", "clean", "-a", "-y"}}, Tools: []Tool{{Name: "conda", InstallCmd: "brew install miniconda"}}},
@@ -729,6 +730,50 @@ func getInstallCommand(tool Tool) string {
 
 // ----- Command runner -----
 
+var pipVersionPattern = regexp.MustCompile(`^pip (\d+)\.(\d+)`)
+
+// resolveCleanCmd returns the command clean should run for cmd, or a skip
+// reason when the command cannot work on this machine.
+func resolveCleanCmd(cmd []string) ([]string, string) {
+	if isPipCachePurge(cmd) {
+		return resolvePipCachePurge()
+	}
+	return cmd, ""
+}
+
+func isPipCachePurge(cmd []string) bool {
+	switch len(cmd) {
+	case 3:
+		return (cmd[0] == "pip" || cmd[0] == "pip3") && cmd[1] == "cache" && cmd[2] == "purge"
+	case 5:
+		return cmd[0] == "python3" && cmd[1] == "-m" && cmd[2] == "pip" && cmd[3] == "cache" && cmd[4] == "purge"
+	}
+	return false
+}
+
+// resolvePipCachePurge runs pip through python3, because a bare `pip` on PATH
+// can belong to another interpreter (e.g. a pyenv Python 2.7 shim) whose pip
+// predates the `cache` command added in pip 20.1.
+func resolvePipCachePurge() ([]string, string) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		return nil, "python3 not found; skipping pip cache purge"
+	}
+	out, err := exec.Command("python3", "-m", "pip", "--version").Output()
+	if err != nil {
+		return nil, "pip is not available for python3; skipping pip cache purge"
+	}
+	m := pipVersionPattern.FindStringSubmatch(strings.TrimSpace(string(out)))
+	if m == nil {
+		return nil, fmt.Sprintf("could not read pip version from %q; skipping pip cache purge", strings.TrimSpace(string(out)))
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	if major < 20 || (major == 20 && minor < 1) {
+		return nil, fmt.Sprintf("pip %s.%s for python3 is older than 20.1 and has no cache command; skipping pip cache purge", m[1], m[2])
+	}
+	return []string{"python3", "-m", "pip", "cache", "purge"}, ""
+}
+
 func runCmd(cmd []string) CmdResult {
 	res := CmdResult{Cmd: cmd}
 	if len(cmd) == 0 {
@@ -803,6 +848,12 @@ func populateCommands(targets []Target, rep *Report) {
 			found := false
 			errorMsg := ""
 
+			resolved, skip := resolveCleanCmd(c)
+			if skip != "" {
+				rep.Commands[t.Name] = append(rep.Commands[t.Name], CmdResult{Cmd: c, Error: skip})
+				continue
+			}
+			c = resolved
 			if len(c) > 0 {
 				if installed, ok := toolStatus[c[0]]; ok {
 					found = installed
@@ -1226,6 +1277,13 @@ func run() int {
 	if *flagClean {
 		for _, t := range targets {
 			for _, c := range t.Cmds {
+				resolved, skip := resolveCleanCmd(c)
+				if skip != "" {
+					fmt.Fprintf(os.Stderr, "warning: [%s] %s\n", t.Name, skip)
+					rep.Warnings = append(rep.Warnings, fmt.Sprintf("[%s] %s", t.Name, skip))
+					continue
+				}
+				c = resolved
 				result := runCmd(c)
 				if result.Error != "" {
 					rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s: %s", strings.Join(c, " "), result.Error))

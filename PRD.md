@@ -119,7 +119,7 @@ targets:
 - **expo** - Expo and React Native caches
 - **go** - Go build & module caches
 - **rust** - Rust registry and build caches
-- **python** - pip, pipenv, and poetry caches
+- **python** - pip, pipenv, and poetry caches. Runs `python3 -m pip cache purge` (a bare `pip` can belong to another interpreter). Configs with `pip cache purge` are resolved the same way. When `python3` or its pip is missing, or pip is older than 20.1 (no `cache` command), the command is skipped with a warning instead of failing.
 - **conda** - Conda package and cache cleanup
 - **maven** - Maven local repository
 - **gradle** - Gradle build caches and wrappers
