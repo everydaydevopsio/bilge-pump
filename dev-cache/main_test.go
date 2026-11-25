@@ -1952,3 +1952,105 @@ func TestScanDirectoryWalkError(t *testing.T) {
 	// Should not panic; may or may not find things depending on walk behavior
 	_ = findings
 }
+
+func TestLanguageLabelsUseProjectSignature(t *testing.T) {
+	root := t.TempDir()
+	mk := func(parts ...string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(append([]string{root}, parts...)...), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch := func(parts ...string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(append([]string{root}, parts...)...), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Repos nested under an org directory, as in ~/src/<org>/<repo>.
+	mk("org", "next-app", "node_modules", "react")
+	mk("org", "next-app", ".next", "cache")
+	touch("org", "next-app", "package.json")
+	touch("org", "next-app", "next.config.js")
+	mk("org", "node-app", "node_modules", "lodash")
+	touch("org", "node-app", "package.json")
+	mk("org", "go-app", "bin")
+	touch("org", "go-app", "go.mod")
+	touch("org", "go-app", "bin", "tool")
+	// A repo directly under the scan root still works.
+	mk("top-node", "node_modules", "x")
+	touch("top-node", "package.json")
+	// No signature anywhere: "unknown", even for a single-language pattern.
+	mk("org", "loose", "node_modules", "y")
+	mk("org", "loose", ".tools", "bin")
+	touch("org", "loose", ".tools", "bin", "tool")
+
+	patterns, patternToLang, sigs, prios, langToPatterns := buildLanguageMaps(defaultConfig().Languages)
+	findings := scanDirectory(root, 3, patterns, patternToLang, true, sigs, prios, langToPatterns, ScanFilters{})
+
+	got := map[string]string{}
+	for _, f := range findings {
+		if f.Pattern == "" {
+			continue
+		}
+		rel, err := filepath.Rel(root, f.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[filepath.ToSlash(rel)] = f.Language
+	}
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"org/next-app/node_modules", "nextjs"},
+		{"org/next-app/.next", "nextjs"},
+		{"org/node-app/node_modules", "node"},
+		{"top-node/node_modules", "node"},
+		{"org/loose/node_modules", "unknown"},
+		{"org/loose/.tools/bin", "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got[tt.path] != tt.want {
+				t.Fatalf("language for %s = %q, want %q (all: %v)", tt.path, got[tt.path], tt.want, got)
+			}
+		})
+	}
+	t.Run("project root is the signature directory", func(t *testing.T) {
+		for _, f := range findings {
+			if filepath.Base(f.Path) == "node_modules" && strings.Contains(f.Path, "node-app") {
+				if want := filepath.Join(root, "org", "node-app"); f.ProjectRoot != want {
+					t.Fatalf("project root = %q, want %q", f.ProjectRoot, want)
+				}
+				return
+			}
+		}
+		t.Fatal("node-app node_modules not found")
+	})
+	t.Run("go bin is not a dotnet cache", func(t *testing.T) {
+		if lang, ok := got["org/go-app/bin"]; ok {
+			t.Fatalf("go repo bin/ reported as %q cache; go patterns do not include bin", lang)
+		}
+	})
+}
+
+func TestBuildLanguageMapsSharedPatternsAreUnknown(t *testing.T) {
+	_, patternToLang, _, _, _ := buildLanguageMaps(defaultConfig().Languages)
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{"node_modules", "unknown"},
+		{"build", "unknown"},
+		{"target", "unknown"},
+		{"bin", "dotnet"},
+		{".venv", "python"},
+		{".next", "nextjs"},
+	}
+	for _, tt := range tests {
+		if got := patternToLang[tt.pattern]; got != tt.want {
+			t.Fatalf("patternToLang[%q] = %q, want %q", tt.pattern, got, tt.want)
+		}
+	}
+}
