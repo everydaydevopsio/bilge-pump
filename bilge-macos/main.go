@@ -434,7 +434,14 @@ func dockerSystemDF() ([]Finding, int64, error) {
 }
 
 func inspectPath(root string) (Finding, error) {
-	f := Finding{Path: root}
+	return inspectPathExcluding(root, root, nil)
+}
+
+// inspectPathExcluding measures walkRoot (the canonical form of display),
+// skipping the subtrees in exclude, which other targets own.
+func inspectPathExcluding(display, walkRoot string, exclude map[string]bool) (Finding, error) {
+	root := walkRoot
+	f := Finding{Path: display}
 	fi, err := os.Stat(root)
 	if err != nil {
 		return f, err
@@ -453,6 +460,9 @@ func inspectPath(root string) (Finding, error) {
 			return nil
 		}
 		if d.IsDir() {
+			if p != root && exclude[p] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		info, e := d.Info()
@@ -827,6 +837,118 @@ func populateCommands(targets []Target, rep *Report) {
 	}
 }
 
+// plannedPath is one path a target measures. Key is the resolved path used
+// for de-duplication; Exclude lists nested subtrees owned by other targets.
+type plannedPath struct {
+	Path    string
+	Key     string
+	Exclude map[string]bool
+	glob    bool
+}
+
+func canonicalPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(p)
+}
+
+func isWithin(child, parent string) bool {
+	rel, err := filepath.Rel(parent, child)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// planTargetPaths expands each non-docker target's paths so every byte is
+// counted once: duplicates (including symlinks to the same directory) and
+// paths nested in another path of the same target are dropped; a path claimed
+// by two targets goes to the one that named it literally rather than by glob
+// (first target on a tie); and a path nested inside another target's path is
+// excluded from that broader path's walk.
+func planTargetPaths(targets []Target) (map[string][]plannedPath, []string) {
+	var warnings []string
+	type claim struct {
+		target string
+		path   plannedPath
+	}
+	var claims []claim
+	for _, t := range targets {
+		if strings.ToLower(t.Name) == "docker" {
+			continue
+		}
+		for _, pattern := range t.Paths {
+			matches, err := expandGlobs(pattern)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("glob error %s:%s: %v", t.Name, pattern, err))
+				continue
+			}
+			glob := strings.ContainsAny(expand(pattern), "*?[")
+			for _, m := range matches {
+				claims = append(claims, claim{t.Name, plannedPath{Path: m, Key: canonicalPath(m), glob: glob}})
+			}
+		}
+	}
+
+	// Pick one owner per resolved path.
+	owner := map[string]int{}
+	for i, c := range claims {
+		j, seen := owner[c.path.Key]
+		if !seen || (claims[j].path.glob && !c.path.glob && claims[j].target != c.target) {
+			owner[c.path.Key] = i
+		}
+	}
+	plans := map[string][]plannedPath{}
+	for i, c := range claims {
+		if owner[c.path.Key] != i {
+			continue
+		}
+		nestedInSameTarget := false
+		for key, j := range owner {
+			if claims[j].target == c.target && isWithin(c.path.Key, key) {
+				nestedInSameTarget = true
+				break
+			}
+		}
+		if nestedInSameTarget {
+			continue
+		}
+		plans[c.target] = append(plans[c.target], c.path)
+	}
+	// Exclude other targets' nested paths from broader walks.
+	for target, paths := range plans {
+		for i := range paths {
+			for other, otherPaths := range plans {
+				if other == target {
+					continue
+				}
+				for _, o := range otherPaths {
+					if isWithin(o.Key, paths[i].Key) {
+						if paths[i].Exclude == nil {
+							paths[i].Exclude = map[string]bool{}
+						}
+						paths[i].Exclude[o.Key] = true
+					}
+				}
+			}
+		}
+	}
+	return plans, warnings
+}
+
+// scanPlannedPaths measures a target's planned paths.
+func scanPlannedPaths(paths []plannedPath) ([]Finding, int64) {
+	var findings []Finding
+	var sum int64
+	for _, p := range paths {
+		f, err := inspectPathExcluding(p.Path, p.Key, p.Exclude)
+		if err != nil {
+			f.Err = err.Error()
+		}
+		findings = append(findings, f)
+		sum += f.SizeBytes
+	}
+	return findings, sum
+}
+
 // runFirstScan scans all targets and populates rep.Findings. Returns beforeTotals map.
 func runFirstScan(targets []Target, rep *Report) map[string]uint64 {
 	beforeTotals := make(map[string]uint64)
@@ -834,6 +956,8 @@ func runFirstScan(targets []Target, rep *Report) map[string]uint64 {
 	if *flagJSON {
 		progress = os.Stderr
 	}
+	plans, warnings := planTargetPaths(targets)
+	rep.Warnings = append(rep.Warnings, warnings...)
 	for _, t := range targets {
 		_, _ = fmt.Fprintf(progress, "Scanning [%s]...", t.Name)
 		var sum int64
@@ -846,23 +970,9 @@ func runFirstScan(targets []Target, rep *Report) map[string]uint64 {
 			rep.Findings[t.Name] = append(rep.Findings[t.Name], findings...)
 			sum = total
 		} else {
-			var expanded []string
-			for _, p := range t.Paths {
-				matches, err := expandGlobs(p)
-				if err != nil {
-					rep.Warnings = append(rep.Warnings, fmt.Sprintf("glob error %s:%s: %v", t.Name, p, err))
-					continue
-				}
-				expanded = append(expanded, matches...)
-			}
-			for _, p := range expanded {
-				f, err := inspectPath(p)
-				if err != nil {
-					f.Err = err.Error()
-				}
-				rep.Findings[t.Name] = append(rep.Findings[t.Name], f)
-				sum += f.SizeBytes
-			}
+			var findings []Finding
+			findings, sum = scanPlannedPaths(plans[t.Name])
+			rep.Findings[t.Name] = append(rep.Findings[t.Name], findings...)
 		}
 		beforeTotals[t.Name] = uint64(sum)
 		_, _ = fmt.Fprintf(progress, " done (%s)\n", human(sum))
@@ -1240,6 +1350,7 @@ func run() int {
 		fmt.Println()
 		fmt.Println("Re-scanning after cleanup...")
 		fmt.Println()
+		afterPlans, _ := planTargetPaths(targets)
 
 		for _, t := range targets {
 			fmt.Printf("Scanning [%s]...", t.Name)
@@ -1252,22 +1363,9 @@ func run() int {
 				afterFindings = append(afterFindings, findings...)
 				sum = total
 			} else {
-				var expanded []string
-				for _, p := range t.Paths {
-					matches, err := expandGlobs(p)
-					if err != nil {
-						continue
-					}
-					expanded = append(expanded, matches...)
-				}
-				for _, p := range expanded {
-					f, err := inspectPath(p)
-					if err != nil {
-						f.Err = err.Error()
-					}
-					afterFindings = append(afterFindings, f)
-					sum += f.SizeBytes
-				}
+				var findings []Finding
+				findings, sum = scanPlannedPaths(afterPlans[t.Name])
+				afterFindings = append(afterFindings, findings...)
 			}
 			afterTotals[t.Name] = uint64(sum)
 			freedSpace[t.Name] = int64(beforeTotals[t.Name]) - int64(afterTotals[t.Name])

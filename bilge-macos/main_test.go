@@ -955,3 +955,67 @@ func TestConfigIO_WriteAndLoad(t *testing.T) {
 		t.Fatalf("nested config not created: %v", err)
 	}
 }
+
+func writeSized(t *testing.T, path string, size int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunFirstScanCountsEachPathOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "") // $(brew --cache) falls back to ~/Library/Caches/Homebrew
+	writeSized(t, filepath.Join(home, "Library", "Caches", "Homebrew", "bottle"), 700)
+	writeSized(t, filepath.Join(home, ".cache", "puppeteer", "chrome"), 100)
+	writeSized(t, filepath.Join(home, ".cache", "uv", "wheel"), 50)
+	writeSized(t, filepath.Join(home, ".cache", "other", "f"), 10)
+	writeSized(t, filepath.Join(home, "lib", "own"), 5)
+	writeSized(t, filepath.Join(home, "lib", "sub", "f"), 30)
+	if err := os.Symlink(filepath.Join(home, "lib", "sub"), filepath.Join(home, "sub-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []Target{
+		{Name: "brew", Paths: []string{"~/Library/Caches/Homebrew", "$(brew --cache)"}},
+		{Name: "home-cache", Paths: []string{"~/.cache/*"}},
+		{Name: "puppeteer", Paths: []string{"~/.cache/puppeteer"}},
+		{Name: "python-uv", Paths: []string{"~/.cache/uv"}},
+		{Name: "broad", Paths: []string{"~/lib"}},
+		{Name: "specific", Paths: []string{"~/sub-link", "~/lib/sub"}},
+	}
+	rep := &Report{Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}}
+	totals := runFirstScan(targets, rep)
+
+	want := map[string]uint64{"brew": 700, "home-cache": 10, "puppeteer": 100, "python-uv": 50, "broad": 5, "specific": 30}
+	for name, size := range want {
+		if totals[name] != size {
+			t.Errorf("%s total = %d, want %d (findings %+v)", name, totals[name], size, rep.Findings[name])
+		}
+	}
+	if n := len(rep.Findings["brew"]); n != 1 {
+		t.Errorf("brew findings = %d, want 1: %+v", n, rep.Findings["brew"])
+	}
+	if n := len(rep.Findings["specific"]); n != 1 {
+		t.Errorf("specific findings = %d, want 1 (symlink and target are one path): %+v", n, rep.Findings["specific"])
+	}
+	for _, f := range rep.Findings["home-cache"] {
+		if base := filepath.Base(f.Path); base == "puppeteer" || base == "uv" {
+			t.Errorf("home-cache still lists %s, owned by another target", f.Path)
+		}
+	}
+}
+
+func TestPlanTargetPathsWithinTargetNesting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeSized(t, filepath.Join(home, "c", "a", "f"), 1)
+	plans, _ := planTargetPaths([]Target{{Name: "t", Paths: []string{"~/c", "~/c/a", "~/c/"}}})
+	if got := plans["t"]; len(got) != 1 || filepath.Base(got[0].Path) != "c" {
+		t.Fatalf("plan = %+v, want only ~/c", got)
+	}
+}
