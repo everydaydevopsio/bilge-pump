@@ -2,14 +2,17 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	yaml "gopkg.in/yaml.v3"
 )
@@ -251,5 +254,19 @@ func TestWindowsBatchLauncherPreservesExecutableAndArgumentBoundaries(t *testing
 	}
 	if _, err := windowsBatchCommand("tool%TEMP%.cmd", nil); err == nil {
 		t.Fatal("expected percent expansion syntax in executable path to be rejected")
+	}
+}
+
+func TestReportTimeIsLocalWholeSeconds(t *testing.T) {
+	when := reportTime()
+	if when.Location() != time.Local || when.Nanosecond() != 0 {
+		t.Fatalf("reportTime() = %v; want local time in whole seconds", when)
+	}
+	b, err := json.Marshal(Report{When: when})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`"when":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)"`).Match(b) {
+		t.Fatalf("when not RFC 3339 with offset: %s", b)
 	}
 }

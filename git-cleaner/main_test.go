@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheckVersionFlag(t *testing.T) {
@@ -414,5 +417,19 @@ func TestExpandScanPath(t *testing.T) {
 	}
 	if got != abs {
 		t.Fatalf("expandScanPath($TEST_SCAN_DIR) = %q, want %q", got, abs)
+	}
+}
+
+func TestReportTimeIsLocalWholeSeconds(t *testing.T) {
+	when := reportTime()
+	if when.Location() != time.Local || when.Nanosecond() != 0 {
+		t.Fatalf("reportTime() = %v; want local time in whole seconds", when)
+	}
+	b, err := json.Marshal(Report{When: when})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`"when":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)"`).Match(b) {
+		t.Fatalf("when not RFC 3339 with offset: %s", b)
 	}
 }

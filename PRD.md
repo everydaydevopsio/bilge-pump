@@ -42,7 +42,8 @@ Ship one unified `bilge` command for macOS, Linux, and Windows. The release bund
 - `bilge clean --all` runs platform-appropriate cleanup tasks; `bilge clean <task>` or `bilge <task>` selects one task.
 - Individual legacy tools remain available for compatibility.
 - One shared JSON report schema and exit-code convention apply to unified orchestration.
-- `bilge scan --json` emits a valid JSON envelope with each selected task's structured report; task progress stays on stderr.
+- `bilge scan --json` emits a valid JSON envelope with each selected task's structured report on stdout. stderr carries only progress and log lines; a task's JSON report is never echoed there. During `clean --json`, a task's text output is progress and is echoed to stderr while it runs.
+- Every report's `when` (the envelope and each task report) is local time in RFC 3339 with its UTC offset, in whole seconds.
 - Platform builds cover macOS, Linux, and Windows (amd64 and arm64 where supported).
 - Windows batch-based cleanup commands preserve executable paths and argument boundaries containing spaces and shell metacharacters; values containing percent signs are rejected because `cmd.exe` expands them before batch execution.
 - Cleanup remains dry-run by default; destructive tasks require explicit `clean` intent and task-level safety controls.
@@ -200,6 +201,7 @@ The `--list-targets` flag shows all available targets:
 
 #### JSON Mode Behavior
 - When `--json` is provided, the app outputs the initial scan results (including totals and warnings) and exits. Cleanup is not performed even if `--clean` is also set.
+- The JSON `commands` field lists, per target, the exact commands clean would run, with whether each is available (`found`) or why it would not run (`error`).
 
 ### Out of Scope
 - Windows/Linux paths (future)

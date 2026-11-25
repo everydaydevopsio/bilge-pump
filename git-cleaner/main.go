@@ -310,6 +310,10 @@ func expandScanPath(scanPath string) (string, error) {
 	return abs, nil
 }
 
+// reportTime is the `when` of a JSON report: local time with its UTC offset,
+// in whole seconds. Every Bilge binary formats `when` this way.
+func reportTime() time.Time { return time.Now().Truncate(time.Second) }
+
 func main() {
 	if checkVersionFlag() {
 		fmt.Printf("version %s, commit %s, built at %s\n", version, commit, date)
@@ -366,7 +370,7 @@ func main() {
 		totalBefore += f.SizeBytes
 	}
 
-	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, When: time.Now().UTC(), DryRun: !*flagClean, Version: version, ScanPath: scanPath, TotalBytes: totalBefore, Findings: findings}
+	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, When: reportTime(), DryRun: !*flagClean, Version: version, ScanPath: scanPath, TotalBytes: totalBefore, Findings: findings}
 	if host, err := os.Hostname(); err == nil {
 		rep.Hostname = host
 	}

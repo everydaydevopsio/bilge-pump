@@ -45,6 +45,10 @@ type Report struct {
 	Tasks   []TaskResult `json:"tasks"`
 }
 
+// reportTime is the `when` of a JSON report: local time with its UTC offset,
+// in whole seconds. Every Bilge binary formats `when` this way.
+func reportTime() time.Time { return time.Now().Truncate(time.Second) }
+
 func configPath() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) && runtime.GOOS != "windows" {
 		return filepath.Join(xdg, "bilge-pump", "config.yaml")
@@ -172,17 +176,24 @@ func runTask(task string, args []string, jsonMode bool) TaskResult {
 		result.ExitCode, result.Error = 1, err.Error()
 		return result
 	}
-	if jsonMode && !containsArg(args, "--clean") {
+	childJSON := jsonMode && !containsArg(args, "--clean")
+	if childJSON {
 		args = append(args, "--json")
 	}
 	cmd := exec.Command(path, args...)
 	cmd.Stdin = os.Stdin
 	var output bytes.Buffer
-	var liveOutput io.Writer = os.Stdout
-	if jsonMode {
-		liveOutput = os.Stderr
+	// With --json, stdout carries only bilge's report. A child's JSON report is
+	// captured into it, never echoed; a cleaning child's text output is
+	// progress, so it is echoed to stderr while it runs.
+	switch {
+	case childJSON:
+		cmd.Stdout = &output
+	case jsonMode:
+		cmd.Stdout = io.MultiWriter(&output, os.Stderr)
+	default:
+		cmd.Stdout = io.MultiWriter(&output, os.Stdout)
 	}
-	cmd.Stdout = io.MultiWriter(&output, liveOutput)
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
 	if err != nil {
@@ -349,7 +360,7 @@ func runWithAgentSetup(args []string, setupAgents func() error) int {
 		results = append(results, runTask(task, taskArgs[task], jsonMode))
 	}
 	if jsonMode {
-		report := Report{Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH, When: time.Now().UTC(), DryRun: !clean, Tasks: results}
+		report := Report{Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH, When: reportTime(), DryRun: !clean, Tasks: results}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(report)

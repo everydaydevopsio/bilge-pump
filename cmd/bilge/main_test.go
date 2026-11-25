@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	yaml "gopkg.in/yaml.v3"
 )
@@ -229,5 +233,53 @@ func TestMacCleanerJSONIsStructured(t *testing.T) {
 	var findings map[string][]map[string]any
 	if err := json.Unmarshal(report["findings"], &findings); err != nil || len(findings["integration"]) == 0 {
 		t.Fatalf("structured macOS findings missing: %v; output=%s", err, result.Output)
+	}
+}
+
+func TestJSONModeKeepsReportOffStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script as a fake task")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'Scanning fixture...' >&2\necho '{\"dry_run\":true,\"findings\":[]}'\n"
+	if err := os.WriteFile(filepath.Join(dir, "git-cleaner"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldStderr := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	result := runTask("git-cleaner", nil, true)
+	os.Stderr = oldStderr
+	_ = writer.Close()
+	stderr, _ := io.ReadAll(reader)
+
+	if string(result.Output) != `{"dry_run":true,"findings":[]}` {
+		t.Fatalf("task output = %s", result.Output)
+	}
+	if !strings.Contains(string(stderr), "Scanning fixture...") {
+		t.Fatalf("progress missing from stderr: %q", stderr)
+	}
+	if strings.Contains(string(stderr), "{") {
+		t.Fatalf("JSON report leaked to stderr: %q", stderr)
+	}
+}
+
+func TestReportTimeIsRFC3339WithOffset(t *testing.T) {
+	when := reportTime()
+	if when.Location() != time.Local || when.Nanosecond() != 0 {
+		t.Fatalf("reportTime() = %v; want local time, whole seconds", when)
+	}
+	b, err := json.Marshal(Report{When: when})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern := regexp.MustCompile(`"when":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)"`)
+	if !pattern.Match(b) {
+		t.Fatalf("when not RFC 3339 with offset: %s", b)
 	}
 }

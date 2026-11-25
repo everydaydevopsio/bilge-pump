@@ -214,6 +214,10 @@ func ensureDir(p string) error { return os.MkdirAll(filepath.Dir(p), 0o755) }
 func home() string           { h, _ := os.UserHomeDir(); return h }
 func expand(p string) string { return os.ExpandEnv(strings.ReplaceAll(p, "~", home())) }
 
+// reportTime is the `when` of a JSON report: local time with its UTC offset,
+// in whole seconds. Every Bilge binary formats `when` this way.
+func reportTime() time.Time { return time.Now().Truncate(time.Second) }
+
 func checkVersionFlag() bool {
 	for _, arg := range os.Args[1:] {
 		if arg == "-version" || arg == "--version" {
@@ -1069,7 +1073,7 @@ func run() int {
 		return 0
 	}
 
-	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, Version: version, When: time.Now(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
+	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, Version: version, When: reportTime(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
 	if h, _ := os.Hostname(); h != "" {
 		rep.Hostname = h
 	}
@@ -1090,6 +1094,9 @@ func run() int {
 	}
 
 	beforeTotals := runFirstScan(targets, &rep)
+	// Planned commands are part of the report in every mode, so a dry run
+	// shows exactly what clean would run.
+	populateCommands(targets, &rep)
 
 	// output initial results
 	if *flagJSON {
@@ -1103,8 +1110,6 @@ func run() int {
 	fmt.Printf("Config: %s\n", *flagConfig)
 	fmt.Printf("Scan: %s\n", rep.When.Format(time.RFC3339))
 	fmt.Printf("Dry-run: %v\n\n", rep.DryRun)
-
-	populateCommands(targets, &rep)
 
 	// Show initial scan results (summary by default; detailed with --details)
 	type kv struct {
