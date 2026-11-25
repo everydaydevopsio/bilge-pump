@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -564,7 +565,7 @@ func TestDisplayDetailed(t *testing.T) {
 		{Path: "/proj1/node_modules", ProjectRoot: "/proj1", SizeBytes: 1000, Items: 5, Pattern: "node_modules", Language: "node"},
 		{Path: "/proj1/.venv", ProjectRoot: "/proj1", SizeBytes: 500, Items: 2, Pattern: ".venv", Language: "python"},
 	}
-	displayDetailed(findings, 1500)
+	displayDetailed(findings, 1500, false)
 
 	_ = w.Close()
 	var buf bytes.Buffer
@@ -585,7 +586,7 @@ func TestDisplayDetailedNoCache(t *testing.T) {
 	findings := []Finding{
 		{Path: "/proj2", ProjectRoot: "/proj2", SizeBytes: 0, Items: 0, Pattern: "", Language: "no language found"},
 	}
-	displayDetailed(findings, 0)
+	displayDetailed(findings, 0, false)
 	_ = w.Close()
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
@@ -605,7 +606,7 @@ func TestDisplayDetailedWithError(t *testing.T) {
 		{Path: "/proj1/node_modules", ProjectRoot: "/proj1", SizeBytes: 1000, Items: 5, Pattern: "node_modules", Language: "node"},
 		{Path: "/proj1/bad", ProjectRoot: "/proj1", SizeBytes: 0, Items: 0, Pattern: "node_modules", Language: "node", Err: "permission denied"},
 	}
-	displayDetailed(findings, 1000)
+	displayDetailed(findings, 1000, false)
 	_ = w.Close()
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
@@ -1951,4 +1952,50 @@ func TestScanDirectoryWalkError(t *testing.T) {
 	findings := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{})
 	// Should not panic; may or may not find things depending on walk behavior
 	_ = findings
+}
+
+func TestDisplayDetailedHidesEmptyProjectsUnlessAll(t *testing.T) {
+	findings := []Finding{
+		{Path: "/big/node_modules", ProjectRoot: "/big", SizeBytes: 4096, Items: 3, Pattern: "node_modules", Language: "node"},
+		{Path: "/empty-cache/node_modules", ProjectRoot: "/empty-cache", SizeBytes: 0, Items: 0, Pattern: "node_modules", Language: "node"},
+		{Path: "/no-cache", ProjectRoot: "/no-cache", Pattern: "", Language: "no language found"},
+	}
+	capture := func(showEmpty bool) string {
+		t.Helper()
+		old := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = w
+		displayDetailed(findings, 4096, showEmpty)
+		_ = w.Close()
+		os.Stdout = old
+		out, _ := io.ReadAll(r)
+		return string(out)
+	}
+	tests := []struct {
+		name      string
+		showEmpty bool
+		present   []string
+		absent    []string
+	}{
+		{"default hides 0 B rows", false, []string{"/big", "2 projects with 0 B hidden; pass --all to show them"}, []string{"/empty-cache", "/no-cache"}},
+		{"--all shows them", true, []string{"/big", "/empty-cache", "/no-cache"}, []string{"hidden"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := capture(tt.showEmpty)
+			for _, s := range tt.present {
+				if !strings.Contains(out, s) {
+					t.Errorf("output missing %q:\n%s", s, out)
+				}
+			}
+			for _, s := range tt.absent {
+				if strings.Contains(out, s) {
+					t.Errorf("output should not contain %q:\n%s", s, out)
+				}
+			}
+		})
+	}
 }

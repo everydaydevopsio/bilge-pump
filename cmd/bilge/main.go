@@ -234,6 +234,9 @@ func runWithAgentSetup(args []string, setupAgents func() error) int {
 		fmt.Printf("version %s, commit %s, built at %s\n", version, commit, date)
 		return 0
 	}
+	if len(args) > 1 && args[0] == "help" {
+		return taskHelp(args[1])
+	}
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		usage()
 		return 0
@@ -335,12 +338,16 @@ func runWithAgentSetup(args []string, setupAgents func() error) int {
 		}
 	}
 	clean := cleanupRequested(command, forceCleanSet, forceClean, extra)
+	// In clean, --all selects every task. Otherwise it is dev-cache's
+	// "show 0 B projects" flag.
+	showAll := !clean && containsArg(extra, "--all")
 	extra = withoutArgs(extra, "--all", "--clean")
 	taskArgs, err := planTaskArgs(selected, extra, clean, cfg.ScanPath, yes)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "argument error:", err)
 		return 1
 	}
+	taskArgs = withShowAll(taskArgs, showAll)
 	results := make([]TaskResult, 0, len(selected))
 	for _, task := range selected {
 		if task == "" {
@@ -449,6 +456,42 @@ func planTaskArgs(tasks, extra []string, clean bool, scanPath string, yes bool) 
 	return planned, nil
 }
 
+// withShowAll forwards --all to dev-cache, the only task with that flag.
+func withShowAll(taskArgs map[string][]string, showAll bool) map[string][]string {
+	if args, ok := taskArgs["dev-cache"]; ok && showAll {
+		taskArgs["dev-cache"] = append(args, "--all")
+	}
+	return taskArgs
+}
+
+// taskHelp prints a task's own help (bilge help <task>).
+func taskHelp(name string) int {
+	task := normalizeTask(name)
+	if !isSupportedTask(task) {
+		fmt.Fprintf(os.Stderr, "unknown task %q\n", name)
+		fmt.Fprintln(os.Stderr, "Tasks: dev-cache, git-cleaner,", platformCleaner())
+		return 1
+	}
+	path, err := executableFor(task)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	cmd := exec.Command(path, "--help")
+	// Go's flag package writes help to stderr; send it to stdout so
+	// `bilge help <task> | less` works.
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
 func isSupportedTask(task string) bool {
 	return task == "dev-cache" || task == "git-cleaner" || (platformCleaner() != "" && task == platformCleaner())
 }
@@ -517,6 +560,7 @@ func usage() {
 	fmt.Println("bilge clean --all [flags]")
 	fmt.Println("bilge clean <task> [flags]")
 	fmt.Println("bilge <task> [flags]")
+	fmt.Println("bilge help <task>         # Show a task's own flags")
 	fmt.Println("bilge mcp                 # Start the local MCP server over stdio")
 	fmt.Println("\nTasks: dev-cache, git-cleaner, bilge-macos, bilge-linux, bilge-windows")
 	fmt.Println("Flags: --config PATH --init [--force] --json --yes")

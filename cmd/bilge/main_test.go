@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	yaml "gopkg.in/yaml.v3"
@@ -229,5 +231,72 @@ func TestMacCleanerJSONIsStructured(t *testing.T) {
 	var findings map[string][]map[string]any
 	if err := json.Unmarshal(report["findings"], &findings); err != nil || len(findings["integration"]) == 0 {
 		t.Fatalf("structured macOS findings missing: %v; output=%s", err, result.Output)
+	}
+}
+
+func fakeTask(t *testing.T, name string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script as a fake task")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho \"" + name + " args: $*\"\n"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func captureStdout(t *testing.T, f func() int) (int, string) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	code := f()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return code, string(out)
+}
+
+func TestHelpTaskShowsTaskHelp(t *testing.T) {
+	fakeTask(t, "dev-cache")
+	tests := []struct {
+		name string
+		args []string
+		code int
+		want string
+	}{
+		{"task help", []string{"help", "dev-cache"}, 0, "dev-cache args: --help"},
+		{"alias", []string{"help", "dev"}, 0, "dev-cache args: --help"},
+		{"general help", []string{"help"}, 0, "bilge clean --all"},
+		{"unknown task", []string{"help", "nope"}, 1, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, out := captureStdout(t, func() int {
+				return runWithAgentSetup(tt.args, func() error { return nil })
+			})
+			if code != tt.code || !strings.Contains(out, tt.want) {
+				t.Fatalf("bilge %v = %d, %q; want %d containing %q", tt.args, code, out, tt.code, tt.want)
+			}
+		})
+	}
+}
+
+func TestScanAllFlagReachesOnlyDevCache(t *testing.T) {
+	got, err := planTaskArgs([]string{"dev-cache", "git-cleaner"}, nil, false, "/src", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = withShowAll(got, true)
+	if !containsArg(got["dev-cache"], "--all") || containsArg(got["git-cleaner"], "--all") {
+		t.Fatalf("args = %v; want --all only for dev-cache", got)
+	}
+	if got := withShowAll(map[string][]string{"dev-cache": {}}, false); containsArg(got["dev-cache"], "--all") {
+		t.Fatalf("--all added without being requested: %v", got)
 	}
 }
