@@ -97,12 +97,9 @@ func serveMCP(in io.Reader, out io.Writer, execute mcpExecutor) error {
 		case request.Method == "tools/list":
 			response.Result = map[string]any{"tools": mcpTools()}
 		case request.Method == "tools/call":
-			var params struct {
-				Name      string          `json:"name"`
-				Arguments json.RawMessage `json:"arguments"`
-			}
-			if err := decodeMCPObject(request.Params, &params); err != nil || params.Name == "" {
-				response.Error = &mcpError{Code: -32602, Message: "tools/call requires a tool name and object arguments"}
+			params, err := decodeMCPToolCall(request.Params)
+			if err != nil {
+				response.Error = &mcpError{Code: -32602, Message: "invalid tools/call params: " + err.Error()}
 				break
 			}
 			result := execute(context.Background(), params.Name, params.Arguments)
@@ -182,24 +179,52 @@ type mcpTaskArgs struct {
 	UnsafeClean bool   `json:"unsafe_clean"`
 }
 
+type mcpToolCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// decodeMCPToolCall reads tools/call params. The MCP spec lets clients add
+// top-level fields such as _meta (Claude Code sends progressToken there), so
+// unknown params are ignored; tool arguments stay strict in executeMCPTool.
+func decodeMCPToolCall(raw json.RawMessage) (mcpToolCall, error) {
+	var params mcpToolCall
+	if err := decodeObject(raw, &params, false, "params"); err != nil {
+		return params, err
+	}
+	if params.Name == "" {
+		return params, errors.New("tool name is required")
+	}
+	arguments := bytes.TrimSpace(params.Arguments)
+	if len(arguments) == 0 || bytes.Equal(arguments, []byte("null")) {
+		params.Arguments = json.RawMessage("{}")
+	} else if arguments[0] != '{' {
+		return params, errors.New("arguments must be an object")
+	}
+	return params, nil
+}
+
 func decodeMCPObject(raw json.RawMessage, dst any) error {
+	return decodeObject(raw, dst, true, "arguments")
+}
+
+func decodeObject(raw json.RawMessage, dst any, strict bool, what string) error {
 	if len(raw) == 0 {
 		raw = []byte("{}")
 	}
 	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return errors.New("arguments must be an object")
-	}
-	if raw[0] != '{' {
-		return errors.New("arguments must be an object")
+	if len(raw) == 0 || raw[0] != '{' {
+		return fmt.Errorf("%s must be an object", what)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(dst); err != nil {
 		return err
 	}
 	if decoder.Decode(new(any)) != io.EOF {
-		return errors.New("unexpected data after arguments")
+		return fmt.Errorf("unexpected data after %s", what)
 	}
 	return nil
 }
@@ -312,13 +337,14 @@ func planMCPTask(args mcpTaskArgs, clean bool) ([]string, error) {
 	} else if task == "all" {
 		command = append(command, "scan")
 	}
-	if task == "all" {
+	switch task {
+	case "all":
 		if clean {
 			command = append(command, "--all")
 		}
-	} else if task == "system" {
+	case "system":
 		command = append(command, platformCleaner())
-	} else {
+	default:
 		command = append(command, task)
 	}
 	if clean && (task == "dev-cache" || task == "all") {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -108,6 +109,87 @@ func TestMCPRejectsUnsafeCallsBeforeExecution(t *testing.T) {
 		result := executeMCPTool(context.Background(), test.name, json.RawMessage(test.args))
 		if !result.IsError {
 			t.Fatalf("%s accepted %s", test.name, test.args)
+		}
+	}
+}
+
+func TestMCPToolsCallAcceptsClaudeCodeMeta(t *testing.T) {
+	tools := []string{"bilge_scan", "bilge_clean", "bilge_list_targets", "bilge_check_tools"}
+	var lines []string
+	lines = append(lines,
+		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude-code","version":"2"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+	)
+	for i, name := range tools {
+		lines = append(lines, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":{},"_meta":{"progressToken":%d,"claudecode/toolUseId":"toolu_%d"}}}`, i+1, name, i+1, i+1))
+	}
+	var output bytes.Buffer
+	var called []string
+	err := serveMCP(strings.NewReader(strings.Join(lines, "\n")+"\n"), &output, func(_ context.Context, name string, args json.RawMessage) mcpToolOutput {
+		called = append(called, name)
+		if string(args) != `{}` {
+			t.Fatalf("%s received arguments %s, want {}", name, args)
+		}
+		return mcpToolOutput{Text: "ok"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(called, tools) {
+		t.Fatalf("called %v, want %v; output: %s", called, tools, output.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n")[1:] {
+		var response map[string]any
+		if err := json.Unmarshal([]byte(line), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response["error"] != nil {
+			t.Fatalf("tools/call with _meta failed: %s", line)
+		}
+	}
+}
+
+func TestMCPToolsCallParamErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		params  string
+		message string
+	}{
+		{"missing name", `{"arguments":{}}`, "tool name"},
+		{"params not an object", `[]`, "params"},
+		{"arguments not an object", `{"name":"bilge_scan","arguments":[1]}`, "arguments must be an object"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
+				`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":` + tt.params + `}` + "\n"
+			var output bytes.Buffer
+			err := serveMCP(strings.NewReader(input), &output, func(context.Context, string, json.RawMessage) mcpToolOutput {
+				t.Fatal("tool handler called for invalid params")
+				return mcpToolOutput{}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+			var response struct {
+				Error *mcpError `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Error == nil || response.Error.Code != -32602 || !strings.Contains(response.Error.Message, tt.message) {
+				t.Fatalf("error = %+v, want -32602 containing %q", response.Error, tt.message)
+			}
+		})
+	}
+}
+
+func TestMCPArgumentsStayStrict(t *testing.T) {
+	for _, name := range []string{"bilge_scan", "bilge_clean", "bilge_list_targets", "bilge_check_tools"} {
+		result := executeMCPTool(context.Background(), name, json.RawMessage(`{"_meta":{},"tsk":"all"}`))
+		if !result.IsError || !strings.Contains(result.Text, "unknown field") {
+			t.Fatalf("%s accepted unknown argument field: %+v", name, result)
 		}
 	}
 }

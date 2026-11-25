@@ -57,6 +57,7 @@ Ship one unified `bilge` command for macOS, Linux, and Windows. The release bund
 ### MCP and agent setup
 - `bilge mcp` serves the existing task capabilities over local stdio, without a network listener or separate release binary. It exposes dry-run scanning, explicit cleanup, platform target discovery, and macOS dependency checks.
 - MCP cleanup requires an explicit confirmation argument and retains the CLI's project-cache Git safety rules. The server never treats a scan as cleanup authorization. Its child processes have bounded execution time and output.
+- `tools/call` accepts MCP-defined extra params such as `_meta` (Claude Code sends `progressToken` there) and ignores unknown top-level params. Tool `arguments` stay strict: an unknown argument field is a tool error, so typos fail loudly. Invalid params return `-32602` with the decoder's reason.
 - `bilge --init` installs a `bilge` MCP registration in available Codex and Claude Code CLIs and installs a disk-savings skill for both. Re-running init preserves an existing Bilge config, existing MCP registrations, and edited skill files so upgrades can complete agent setup without overwriting user work.
 - The disk-savings skill uses the MCP scan tools for low-disk investigations, distinguishes estimated savings from command-only targets, requests authorization before cleanup, and measures again afterward.
 
