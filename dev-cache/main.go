@@ -1856,7 +1856,9 @@ func displayDetailed(findings []Finding, total int64, showEmpty bool) {
 		if hidden == 1 {
 			noun = "project"
 		}
-		fmt.Printf("%d %s with 0 B hidden; pass --all to show them\n", hidden, noun)
+		// Name a scan command, not a flag to append: `bilge clean dev-cache --all`
+		// would select every cleanup task.
+		fmt.Printf("%d %s with 0 B hidden; list them with a scan: dev-cache --all (or bilge dev-cache --all)\n", hidden, noun)
 	}
 }
 

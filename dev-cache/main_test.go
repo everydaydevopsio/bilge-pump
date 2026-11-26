@@ -1980,7 +1980,10 @@ func TestDisplayDetailedHidesEmptyProjectsUnlessAll(t *testing.T) {
 		present   []string
 		absent    []string
 	}{
-		{"default hides 0 B rows", false, []string{"/big", "2 projects with 0 B hidden; pass --all to show them"}, []string{"/empty-cache", "/no-cache"}},
+		// The hint must name a scan command: after `bilge clean dev-cache`,
+		// "pass --all" would lead to `bilge clean dev-cache --all`, which
+		// selects every cleanup task.
+		{"default hides 0 B rows", false, []string{"/big", "2 projects with 0 B hidden", "dev-cache --all", "bilge dev-cache --all"}, []string{"/empty-cache", "/no-cache", "pass --all"}},
 		{"--all shows them", true, []string{"/big", "/empty-cache", "/no-cache"}, []string{"hidden"}},
 	}
 	for _, tt := range tests {
