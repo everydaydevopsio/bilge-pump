@@ -96,7 +96,7 @@ Much of this overlaps existing priorities. Don't open duplicate issues; comment 
 - Unit: every item above names its failing test. Table tests per `AGENTS.md`.
 - Integration: MCP stdio test harness sending Claude Code-shaped requests (with `_meta` and `progressToken`) for all tools.
 - Failure paths: stale config with destructive commands; non-local Docker context; old pip; Git-tracked cache dirs; unreadable dirs.
-- Manual: rerun only the Bilge dry-run steps of the field-test log (1–4 and 9: MCP calls, `bilge scan --json`, `dev-cache --depth 3`, rescans) on a Mac and compare against the report. Never replay steps 5–8: step 6 prunes whatever Docker context is active and step 8 is a raw `rm -rf`. Validate clean paths only in a disposable environment: a temporary `HOME` with fixture caches, and Docker only after confirming `docker context inspect` points at a local, throwaway endpoint.
+- Manual: rerun only the Bilge dry-run steps of the field-test log (1–4 and 9: MCP calls, `bilge scan --json`, `dev-cache --depth 3`, rescans) on a Mac and compare against the report. Never replay steps 5–8: step 6 prunes whatever Docker context is active and step 8 is a raw `rm -rf`. Validate clean paths only where nothing real can be lost: fixture tests use a temporary `HOME` **and** a controlled `PATH` of stub commands (a temporary `HOME` alone does not isolate `brew cleanup`/`brew autoremove`, `pip`, `go`, etc., which act on host installs). Real cleanup runs only in a disposable macOS VM with its own Homebrew, and Docker only after `docker context inspect` confirms a local, throwaway endpoint.
 - Requirement-to-test mapping: each PR lists finding ID → test name in its description.
 
 ## Rollback Strategy
