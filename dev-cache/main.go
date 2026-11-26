@@ -45,6 +45,7 @@ var (
 	flagMinAge      = flag.String("min-age", "", "Only include caches older than this (e.g. 30d, 48h)")
 	flagMaxAge      = flag.String("max-age", "", "Only include caches no older than this (e.g. 7d, 24h)")
 	flagUnsafeClean = flag.Bool("unsafe-clean", false, "Allow deleting cache paths that are not ignored by Git (unsafe)")
+	flagAll         = flag.Bool("all", false, "Show projects with 0 B of cache in the table")
 )
 
 func init() {
@@ -1027,7 +1028,7 @@ func main() {
 	}
 
 	// Display results
-	displayDetailed(findings, total)
+	displayDetailed(findings, total, *flagAll)
 
 	partialFailure := false
 	// Cleanup if requested
@@ -1692,7 +1693,9 @@ func matchPattern(name, pattern string) bool {
 	return false
 }
 
-func displayDetailed(findings []Finding, total int64) {
+// displayDetailed prints one row per project. Projects with 0 B of cache are
+// hidden, with a count, unless showEmpty is set (--all).
+func displayDetailed(findings []Finding, total int64, showEmpty bool) {
 	// Group findings by project path, then by cache type
 	type cacheTypeSummary struct {
 		SizeBytes int64
@@ -1802,7 +1805,13 @@ func displayDetailed(findings []Finding, total int64) {
 	table.Header("Project Path", "Cache Types", "Language", "Total Size", "Total Items")
 
 	var totalItems int
+	hidden := 0
 	for _, project := range projectEntries {
+		if project.totalSize == 0 && !showEmpty {
+			hidden++
+			totalItems += project.totalItems
+			continue
+		}
 		cacheTypes := project.cacheTypes
 
 		// Sort cache types by size (largest first) within each project
@@ -1841,6 +1850,15 @@ func displayDetailed(findings []Finding, total int64) {
 	table.Footer("TOTAL", "", "", human(total), fmt.Sprintf("%d", totalItems))
 	if err := table.Render(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to render table: %v\n", err)
+	}
+	if hidden > 0 {
+		noun := "projects"
+		if hidden == 1 {
+			noun = "project"
+		}
+		// Name a scan command, not a flag to append: `bilge clean dev-cache --all`
+		// would select every cleanup task.
+		fmt.Printf("%d %s with 0 B hidden; list them with a scan: dev-cache --all (or bilge dev-cache --all)\n", hidden, noun)
 	}
 }
 

@@ -40,6 +40,7 @@ Ship one unified `bilge` command for macOS, Linux, and Windows. The release bund
 ### CLI and behavior
 - `bilge scan` reports findings across tasks without changing files.
 - `bilge clean --all` runs platform-appropriate cleanup tasks; `bilge clean <task>` or `bilge <task>` selects one task.
+- `bilge help <task>` prints that task's own flags (task aliases such as `dev` or `system` work); `bilge help` prints the general usage.
 - Individual legacy tools remain available for compatibility.
 - One shared JSON report schema and exit-code convention apply to unified orchestration.
 - `bilge scan --json` emits a valid JSON envelope with each selected task's structured report; task progress stays on stderr.
@@ -247,6 +248,7 @@ A cross-platform Go CLI tool that scans source code directories to find and opti
 - `--yes` skips confirmation prompt for cleanup
 - `--json` outputs results as JSON
 - `--details` shows detailed per-project breakdown
+- `--all` shows projects with 0 B of cache in the table; by default they are hidden and counted in a line under the table, which names a scan command (`dev-cache --all` / `bilge dev-cache --all`) rather than telling the user to append `--all`, because `bilge clean dev-cache --all` selects every cleanup task. JSON output always includes every finding. `bilge dev-cache --all[=BOOL]` and `bilge scan --all[=BOOL]` forward it to dev-cache, including with `--clean` on a single task; only in the `bilge clean` subcommand does `--all` still select every task.
 
 #### Configuration Structure
 ```yaml
