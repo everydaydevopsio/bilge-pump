@@ -1082,3 +1082,18 @@ func TestCanonicalPathRelatesRelativeAndAbsolute(t *testing.T) {
 		t.Fatalf("relative %q and absolute %q resolve differently", canonicalPath("cache"), canonicalPath(filepath.Join(dir, "cache")))
 	}
 }
+
+func TestCanonicalPathResolvesSymlinkBeforeDotDot(t *testing.T) {
+	base := t.TempDir()
+	writeSized(t, filepath.Join(base, "cache", "payload"), 3)
+	writeSized(t, filepath.Join(base, "other", "child", "keep"), 1)
+	writeSized(t, filepath.Join(base, "other", "payload"), 9)
+	if err := os.Symlink(filepath.Join("..", "other", "child"), filepath.Join(base, "cache", "link")); err != nil {
+		t.Fatal(err)
+	}
+	// The kernel resolves link first, so link/../payload is other/payload.
+	literal := filepath.Join(base, "cache", "link") + string(filepath.Separator) + ".." + string(filepath.Separator) + "payload"
+	if got, want := canonicalPath(literal), canonicalPath(filepath.Join(base, "other", "payload")); got != want {
+		t.Fatalf("canonicalPath(%q) = %q, want %q", literal, got, want)
+	}
+}

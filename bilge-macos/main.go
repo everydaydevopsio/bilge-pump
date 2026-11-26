@@ -850,12 +850,18 @@ type plannedPath struct {
 	glob    bool
 }
 
+// canonicalPath returns the identity used to dedupe and nest planned paths.
+// Symlinks are resolved before ".." is cleaned (Abs/Clean are lexical), and on
+// macOS the kernel's spelling is used so case aliases match.
 func canonicalPath(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
+	if real, ok := kernelPath(p); ok {
+		return filepath.Clean(real)
 	}
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return filepath.Clean(resolved)
+		p = resolved
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
 	}
 	return filepath.Clean(p)
 }
