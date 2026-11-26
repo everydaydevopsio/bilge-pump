@@ -58,25 +58,25 @@ jobs:
         working-directory: ${{ inputs.app_name }}
         run: |
           mkdir -p build
-          GOOS=linux GOARCH=amd64 go build -o build/${{ inputs.app_name }}-linux-amd64 main.go
+          GOOS=linux GOARCH=amd64 go build -o build/${{ inputs.app_name }}-linux-amd64 .
 
       - name: Build for Linux arm64
         working-directory: ${{ inputs.app_name }}
         run: |
           mkdir -p build
-          GOOS=linux GOARCH=arm64 go build -o build/${{ inputs.app_name }}-linux-arm64 main.go
+          GOOS=linux GOARCH=arm64 go build -o build/${{ inputs.app_name }}-linux-arm64 .
 
       - name: Build for Darwin amd64
         working-directory: ${{ inputs.app_name }}
         run: |
           mkdir -p build
-          GOOS=darwin GOARCH=amd64 go build -o build/${{ inputs.app_name }}-darwin-amd64 main.go
+          GOOS=darwin GOARCH=amd64 go build -o build/${{ inputs.app_name }}-darwin-amd64 .
 
       - name: Build for Darwin arm64
         working-directory: ${{ inputs.app_name }}
         run: |
           mkdir -p build
-          GOOS=darwin GOARCH=arm64 go build -o build/${{ inputs.app_name }}-darwin-arm64 main.go
+          GOOS=darwin GOARCH=arm64 go build -o build/${{ inputs.app_name }}-darwin-arm64 .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

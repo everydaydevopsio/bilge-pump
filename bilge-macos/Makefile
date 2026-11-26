@@ -56,7 +56,7 @@ clean:
 	@rm -rf $(BUILD_DIR)
 
 package: build
-	@zip -r $(ZIP_NAME) $(BUILD_DIR) ../README.md ../PRD.md Makefile go.mod main.go
+	@zip -r $(ZIP_NAME) $(BUILD_DIR) ../README.md ../PRD.md Makefile go.mod go.sum $(filter-out %_test.go,$(wildcard *.go))
 
 .PHONY: all build run clean package fmt vet lint install test coverage
 .PHONY: pre-commit-enable pre-commit
