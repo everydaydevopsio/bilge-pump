@@ -955,3 +955,92 @@ func TestConfigIO_WriteAndLoad(t *testing.T) {
 		t.Fatalf("nested config not created: %v", err)
 	}
 }
+
+func TestAndroidTargetIsInformational(t *testing.T) {
+	for _, target := range defaultConfig().Targets {
+		if target.Name != "android" {
+			continue
+		}
+		if len(target.Cmds) != 0 {
+			t.Fatalf("android cmds = %v; want none (informational)", target.Cmds)
+		}
+		for _, p := range target.Paths {
+			if p == "~/Library/Android/sdk" {
+				t.Fatal("android target counts the whole SDK as cache")
+			}
+		}
+		return
+	}
+	t.Fatal("no android target")
+}
+
+func writeAndroidFixture(t *testing.T, path string, size int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAndroidHintsListAVDsAndSystemImages(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeAndroidFixture(t, filepath.Join(home, ".android", "avd", "Pixel_7.avd", "userdata.img"), 300)
+	writeAndroidFixture(t, filepath.Join(home, ".android", "avd", "Pixel_7.ini"), 10)
+	writeAndroidFixture(t, filepath.Join(home, "Library", "Android", "sdk", "system-images", "android-34", "google_apis", "arm64-v8a", "system.img"), 500)
+	writeAndroidFixture(t, filepath.Join(home, "Library", "Android", "sdk", "platforms", "android-34", "android.jar"), 900)
+
+	var android Target
+	for _, target := range defaultConfig().Targets {
+		if target.Name == "android" {
+			android = target
+		}
+	}
+	rep := &Report{Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Hints: map[string][]string{}}
+	totals := runFirstScan([]Target{android}, rep)
+	if totals["android"] != 800 {
+		t.Fatalf("android total = %d, want 800 (AVD + system image, not platforms): %+v", totals["android"], rep.Findings["android"])
+	}
+	hints := strings.Join(rep.Hints["android"], "\n")
+	for _, want := range []string{
+		"avdmanager delete avd -n Pixel_7",
+		`sdkmanager --uninstall "system-images;android-34;google_apis;arm64-v8a"`,
+	} {
+		if !strings.Contains(hints, want) {
+			t.Errorf("hints missing %q:\n%s", want, hints)
+		}
+	}
+}
+
+func TestLoadConfigDropsSdkmanagerUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	stale := "version: 1\noptions: {}\ntargets:\n  - name: android\n    enabled: true\n    cmds: [[\"sdkmanager\", \"--update\"]]\n"
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigWithDefaults(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Targets[0].Cmds) != 0 {
+		t.Fatalf("android cmds = %v; want sdkmanager --update dropped", cfg.Targets[0].Cmds)
+	}
+}
+
+func TestAndroidHintsForStaleConfigPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeAndroidFixture(t, filepath.Join(home, ".android", "avd", "Pixel_7.avd", "userdata.img"), 300)
+	writeAndroidFixture(t, filepath.Join(home, "Library", "Android", "sdk", "system-images", "android-34", "google_apis", "arm64-v8a", "system.img"), 500)
+	stale := Target{Name: "android", Paths: []string{"~/.android/avd", "~/Library/Android/sdk"}}
+	rep := &Report{Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}}
+	runFirstScan([]Target{stale}, rep)
+	hints := strings.Join(rep.Hints["android"], "\n")
+	for _, want := range []string{"avdmanager delete avd -n Pixel_7", `"system-images;android-34;google_apis;arm64-v8a"`, "300 B", "500 B"} {
+		if !strings.Contains(hints, want) {
+			t.Errorf("hints missing %q:\n%s", want, hints)
+		}
+	}
+}
