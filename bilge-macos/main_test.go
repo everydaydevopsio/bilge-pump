@@ -6,8 +6,11 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -953,5 +956,150 @@ func TestConfigIO_WriteAndLoad(t *testing.T) {
 	}
 	if _, err := os.Stat(nestedPath); err != nil {
 		t.Fatalf("nested config not created: %v", err)
+	}
+}
+
+// fakePython puts a stub python3 on PATH. pipVersion "" makes `python3 -m pip`
+// fail as if pip were not installed for that interpreter.
+func fakePython(t *testing.T, pipVersion string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexit 1\n"
+	if pipVersion != "" {
+		script = "#!/bin/sh\nif [ \"$1 $2 $3 $4\" = \"-I -m pip --version\" ]; then echo \"pip " + pipVersion + " from /stub/site-packages/pip (python 3.x)\"; exit 0; fi\nexit 1\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A pip on PATH from a different (old) interpreter must not be used.
+	if err := os.WriteFile(filepath.Join(dir, "pip"), []byte("#!/bin/sh\necho 'pip 19.2.3 (python 2.7)'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func TestResolveCleanCmdPip(t *testing.T) {
+	purge := []string{"python3", "-I", "-m", "pip", "cache", "purge"}
+	tests := []struct {
+		name       string
+		python     bool
+		pipVersion string
+		cmd        []string
+		want       []string
+		skip       string
+	}{
+		{"legacy pip command uses python3 -m pip", true, "24.0", []string{"pip", "cache", "purge"}, purge, ""},
+		{"python3 -m pip command", true, "20.1", []string{"python3", "-m", "pip", "cache", "purge"}, purge, ""},
+		{"isolated python3 command", true, "20.1", purge, purge, ""},
+		{"pip3 command", true, "23.3.1", []string{"pip3", "cache", "purge"}, purge, ""},
+		{"old pip skipped", true, "19.2.3", []string{"pip", "cache", "purge"}, nil, "older than 20.1"},
+		{"pip 20.0 skipped", true, "20.0.2", purge, nil, "older than 20.1"},
+		{"pip missing skipped", true, "", []string{"pip", "cache", "purge"}, nil, "pip is not available"},
+		{"python3 missing skipped", false, "", []string{"pip", "cache", "purge"}, nil, "python3 not found"},
+		{"other commands unchanged", true, "24.0", []string{"go", "clean", "-cache"}, []string{"go", "clean", "-cache"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.python {
+				fakePython(t, tt.pipVersion)
+			} else {
+				t.Setenv("PATH", t.TempDir())
+			}
+			got, skip := resolveCleanCmd(tt.cmd)
+			if tt.skip != "" {
+				if got != nil || !strings.Contains(skip, tt.skip) {
+					t.Fatalf("resolveCleanCmd(%v) = %v, %q; want skip containing %q", tt.cmd, got, skip, tt.skip)
+				}
+				return
+			}
+			if skip != "" || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("resolveCleanCmd(%v) = %v, %q; want %v", tt.cmd, got, skip, tt.want)
+			}
+		})
+	}
+}
+
+func TestPopulateCommandsShowsPipSkip(t *testing.T) {
+	fakePython(t, "19.2.3")
+	rep := &Report{Commands: map[string][]CmdResult{}}
+	populateCommands([]Target{{Name: "python", Cmds: [][]string{{"pip", "cache", "purge"}}}}, rep)
+	got := rep.Commands["python"]
+	if len(got) != 1 || got[0].Found || !strings.Contains(got[0].Error, "older than 20.1") {
+		t.Fatalf("python commands = %+v, want skipped old pip", got)
+	}
+	if len(rep.Warnings) != 1 || !strings.Contains(rep.Warnings[0], "[python]") || !strings.Contains(rep.Warnings[0], "older than 20.1") {
+		t.Fatalf("warnings = %q, want the skip reason so the table shows it", rep.Warnings)
+	}
+}
+
+func TestDefaultPythonTargetUsesInterpreterPip(t *testing.T) {
+	for _, target := range defaultConfig().Targets {
+		if target.Name == "python" {
+			want := [][]string{{"python3", "-I", "-m", "pip", "cache", "purge"}}
+			if !reflect.DeepEqual(target.Cmds, want) {
+				t.Fatalf("python cmds = %v, want %v", target.Cmds, want)
+			}
+			return
+		}
+	}
+	t.Fatal("no python target")
+}
+
+func TestPipProbeIgnoresModulesInWorkingDirectory(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "executed")
+	planted := "open(" + strconv.Quote(marker) + ", 'w').close()\n"
+	if err := os.WriteFile(filepath.Join(dir, "pip.py"), []byte(planted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(old) }()
+	_, _ = resolveCleanCmd([]string{"pip", "cache", "purge"})
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a pip.py in the working directory was executed by the pip probe")
+	}
+}
+
+func TestRunJSONReportsPipSkip(t *testing.T) {
+	oldJSON := *flagJSON
+	defer func() { *flagJSON = oldJSON }()
+	fakePython(t, "19.2.3")
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	cfgYAML := "version: 1\noptions: {}\ntargets:\n  - name: python\n    enabled: true\n    paths: [\"" + tmpDir + "\"]\n    cmds: [[\"pip\", \"cache\", \"purge\"]]\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"bilge-macos", "--config", cfgPath, "--json", "--targets", "python"}
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	code := run()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if code != 0 {
+		t.Fatalf("run() = %d: %s", code, out)
+	}
+	var rep Report
+	if err := json.Unmarshal(out, &rep); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, out)
+	}
+	if got := rep.Commands["python"]; len(got) != 1 || !strings.Contains(got[0].Error, "older than 20.1") {
+		t.Fatalf("commands[python] = %+v, want the pip skip", got)
+	}
+	if len(rep.Warnings) == 0 || !strings.Contains(strings.Join(rep.Warnings, "\n"), "older than 20.1") {
+		t.Fatalf("warnings = %q, want the pip skip", rep.Warnings)
 	}
 }
