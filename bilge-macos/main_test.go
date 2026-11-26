@@ -955,3 +955,145 @@ func TestConfigIO_WriteAndLoad(t *testing.T) {
 		t.Fatalf("nested config not created: %v", err)
 	}
 }
+
+func writeSized(t *testing.T, path string, size int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunFirstScanCountsEachPathOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "") // $(brew --cache) falls back to ~/Library/Caches/Homebrew
+	writeSized(t, filepath.Join(home, "Library", "Caches", "Homebrew", "bottle"), 700)
+	writeSized(t, filepath.Join(home, ".cache", "puppeteer", "chrome"), 100)
+	writeSized(t, filepath.Join(home, ".cache", "uv", "wheel"), 50)
+	writeSized(t, filepath.Join(home, ".cache", "other", "f"), 10)
+	writeSized(t, filepath.Join(home, "lib", "own"), 5)
+	writeSized(t, filepath.Join(home, "lib", "sub", "f"), 30)
+	if err := os.Symlink(filepath.Join(home, "lib", "sub"), filepath.Join(home, "sub-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []Target{
+		{Name: "brew", Paths: []string{"~/Library/Caches/Homebrew", "$(brew --cache)"}},
+		{Name: "home-cache", Paths: []string{"~/.cache/*"}},
+		{Name: "puppeteer", Paths: []string{"~/.cache/puppeteer"}},
+		{Name: "python-uv", Paths: []string{"~/.cache/uv"}},
+		{Name: "broad", Paths: []string{"~/lib"}},
+		{Name: "specific", Paths: []string{"~/sub-link", "~/lib/sub"}},
+	}
+	rep := &Report{Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}}
+	totals := runFirstScan(targets, rep)
+
+	want := map[string]uint64{"brew": 700, "home-cache": 10, "puppeteer": 100, "python-uv": 50, "broad": 5, "specific": 30}
+	for name, size := range want {
+		if totals[name] != size {
+			t.Errorf("%s total = %d, want %d (findings %+v)", name, totals[name], size, rep.Findings[name])
+		}
+	}
+	if n := len(rep.Findings["brew"]); n != 1 {
+		t.Errorf("brew findings = %d, want 1: %+v", n, rep.Findings["brew"])
+	}
+	if n := len(rep.Findings["specific"]); n != 1 {
+		t.Errorf("specific findings = %d, want 1 (symlink and target are one path): %+v", n, rep.Findings["specific"])
+	}
+	for _, f := range rep.Findings["home-cache"] {
+		if base := filepath.Base(f.Path); base == "puppeteer" || base == "uv" {
+			t.Errorf("home-cache still lists %s, owned by another target", f.Path)
+		}
+	}
+}
+
+func TestPlanTargetPathsWithinTargetNesting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeSized(t, filepath.Join(home, "c", "a", "f"), 1)
+	plans, _ := planTargetPaths([]Target{{Name: "t", Paths: []string{"~/c", "~/c/a", "~/c/"}}})
+	if got := plans["t"]; len(got) != 1 || filepath.Base(got[0].Path) != "c" {
+		t.Fatalf("plan = %+v, want only ~/c", got)
+	}
+}
+
+func TestPlanTargetPathsOwnershipEdgeCases(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeSized(t, filepath.Join(home, "cache", "archive.bin"), 40)
+	writeSized(t, filepath.Join(home, "cache", "other"), 2)
+	writeSized(t, filepath.Join(home, "cache", "uv", "w"), 7)
+	writeSized(t, filepath.Join(home, "cache", "tool", "t"), 3)
+	writeSized(t, filepath.Join(home, "cache", "tool", "private", "p"), 11)
+
+	scan := func(targets []Target) map[string]uint64 {
+		t.Helper()
+		rep := &Report{Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}}
+		return runFirstScan(targets, rep)
+	}
+	tests := []struct {
+		name    string
+		targets []Target
+		want    map[string]uint64
+	}{
+		{
+			"file claimed inside another target's dir counts once",
+			[]Target{{Name: "a", Paths: []string{"~/cache"}}, {Name: "b", Paths: []string{"~/cache/archive.bin"}}},
+			map[string]uint64{"a": 23, "b": 40},
+		},
+		{
+			"literal claim beats own glob before a later target",
+			[]Target{{Name: "a", Paths: []string{"~/cache/*", "~/cache/uv"}}, {Name: "b", Paths: []string{"~/cache/uv"}}},
+			map[string]uint64{"a": 63, "b": 0},
+		},
+		{
+			"A/B/A nesting keeps the inner path with A",
+			[]Target{{Name: "a", Paths: []string{"~/cache", "~/cache/tool/private"}}, {Name: "b", Paths: []string{"~/cache/tool"}}},
+			map[string]uint64{"a": 49 + 11, "b": 3},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scan(tt.targets)
+			for name, want := range tt.want {
+				if got[name] != want {
+					t.Errorf("%s total = %d, want %d (all %v)", name, got[name], want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestCanonicalPathRelatesRelativeAndAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	writeSized(t, filepath.Join(dir, "cache", "f"), 5)
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(old) }()
+	if canonicalPath("cache") != canonicalPath(filepath.Join(dir, "cache")) {
+		t.Fatalf("relative %q and absolute %q resolve differently", canonicalPath("cache"), canonicalPath(filepath.Join(dir, "cache")))
+	}
+}
+
+func TestCanonicalPathResolvesSymlinkBeforeDotDot(t *testing.T) {
+	base := t.TempDir()
+	writeSized(t, filepath.Join(base, "cache", "payload"), 3)
+	writeSized(t, filepath.Join(base, "other", "child", "keep"), 1)
+	writeSized(t, filepath.Join(base, "other", "payload"), 9)
+	if err := os.Symlink(filepath.Join("..", "other", "child"), filepath.Join(base, "cache", "link")); err != nil {
+		t.Fatal(err)
+	}
+	// The kernel resolves link first, so link/../payload is other/payload.
+	literal := filepath.Join(base, "cache", "link") + string(filepath.Separator) + ".." + string(filepath.Separator) + "payload"
+	if got, want := canonicalPath(literal), canonicalPath(filepath.Join(base, "other", "payload")); got != want {
+		t.Fatalf("canonicalPath(%q) = %q, want %q", literal, got, want)
+	}
+}

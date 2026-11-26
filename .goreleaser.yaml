@@ -53,7 +53,7 @@ builds:
 
   # bilge-macos binary
   - id: bilge-macos
-    main: ./main.go
+    main: .
     dir: ./bilge-macos
     binary: bilge-macos
     env:

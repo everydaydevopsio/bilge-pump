@@ -152,6 +152,7 @@ targets:
 - Supports `$(brew --cache)` expansion
 - Glob patterns for flexible matching
 - Command substitutions are whitelist-only for safety; currently only `brew --cache` is supported. Other substitutions (e.g., `$(docker ...)`) are rejected.
+- Every byte is counted once. Expanded paths are resolved to a canonical identity (on macOS the kernel's path via `F_GETPATH`, which also folds case aliases on case-insensitive volumes; elsewhere `EvalSymlinks` before `Abs`/`Clean`, so `..` after a symlink resolves correctly); a target's duplicate paths, or paths nested in another of its paths, count once. Relative paths are made absolute first. A path claimed more than once belongs to the claim that names it literally rather than by glob (so `puppeteer` and `python-uv` own `~/.cache/puppeteer` and `~/.cache/uv`, not `home-cache`), with the first claim winning a tie. A path nested inside another measured path (file or directory) is excluded from the broader walk; a target's own nested path is kept when another target's path lies between them. Ownership is decided among the targets selected for the run.
 
 #### Reporting Features
 - Size measurement in bytes with human-readable output
