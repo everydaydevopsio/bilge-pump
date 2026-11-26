@@ -1019,3 +1019,66 @@ func TestPlanTargetPathsWithinTargetNesting(t *testing.T) {
 		t.Fatalf("plan = %+v, want only ~/c", got)
 	}
 }
+
+func TestPlanTargetPathsOwnershipEdgeCases(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeSized(t, filepath.Join(home, "cache", "archive.bin"), 40)
+	writeSized(t, filepath.Join(home, "cache", "other"), 2)
+	writeSized(t, filepath.Join(home, "cache", "uv", "w"), 7)
+	writeSized(t, filepath.Join(home, "cache", "tool", "t"), 3)
+	writeSized(t, filepath.Join(home, "cache", "tool", "private", "p"), 11)
+
+	scan := func(targets []Target) map[string]uint64 {
+		t.Helper()
+		rep := &Report{Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}}
+		return runFirstScan(targets, rep)
+	}
+	tests := []struct {
+		name    string
+		targets []Target
+		want    map[string]uint64
+	}{
+		{
+			"file claimed inside another target's dir counts once",
+			[]Target{{Name: "a", Paths: []string{"~/cache"}}, {Name: "b", Paths: []string{"~/cache/archive.bin"}}},
+			map[string]uint64{"a": 23, "b": 40},
+		},
+		{
+			"literal claim beats own glob before a later target",
+			[]Target{{Name: "a", Paths: []string{"~/cache/*", "~/cache/uv"}}, {Name: "b", Paths: []string{"~/cache/uv"}}},
+			map[string]uint64{"a": 63, "b": 0},
+		},
+		{
+			"A/B/A nesting keeps the inner path with A",
+			[]Target{{Name: "a", Paths: []string{"~/cache", "~/cache/tool/private"}}, {Name: "b", Paths: []string{"~/cache/tool"}}},
+			map[string]uint64{"a": 49 + 11, "b": 3},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scan(tt.targets)
+			for name, want := range tt.want {
+				if got[name] != want {
+					t.Errorf("%s total = %d, want %d (all %v)", name, got[name], want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestCanonicalPathRelatesRelativeAndAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	writeSized(t, filepath.Join(dir, "cache", "f"), 5)
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(old) }()
+	if canonicalPath("cache") != canonicalPath(filepath.Join(dir, "cache")) {
+		t.Fatalf("relative %q and absolute %q resolve differently", canonicalPath("cache"), canonicalPath(filepath.Join(dir, "cache")))
+	}
+}

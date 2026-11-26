@@ -459,10 +459,14 @@ func inspectPathExcluding(display, walkRoot string, exclude map[string]bool) (Fi
 			}
 			return nil
 		}
-		if d.IsDir() {
-			if p != root && exclude[p] {
+		// Paths owned by another planned path, file or directory, are counted there.
+		if p != root && exclude[p] {
+			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		info, e := d.Info()
@@ -847,6 +851,9 @@ type plannedPath struct {
 }
 
 func canonicalPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return filepath.Clean(resolved)
 	}
@@ -859,18 +866,14 @@ func isWithin(child, parent string) bool {
 }
 
 // planTargetPaths expands each non-docker target's paths so every byte is
-// counted once: duplicates (including symlinks to the same directory) and
-// paths nested in another path of the same target are dropped; a path claimed
-// by two targets goes to the one that named it literally rather than by glob
-// (first target on a tie); and a path nested inside another target's path is
-// excluded from that broader path's walk.
+// counted once. A path claimed more than once goes to the claim that names it
+// literally rather than by glob (the first claim on a tie, even within one
+// target). A path nested in another path of the same target is dropped,
+// unless another target's path lies between them. Every kept path excludes
+// the kept paths (files or directories) nested inside it from its walk.
 func planTargetPaths(targets []Target) (map[string][]plannedPath, []string) {
 	var warnings []string
-	type claim struct {
-		target string
-		path   plannedPath
-	}
-	var claims []claim
+	var claims []pathClaim
 	for _, t := range targets {
 		if strings.ToLower(t.Name) == "docker" {
 			continue
@@ -883,7 +886,7 @@ func planTargetPaths(targets []Target) (map[string][]plannedPath, []string) {
 			}
 			glob := strings.ContainsAny(expand(pattern), "*?[")
 			for _, m := range matches {
-				claims = append(claims, claim{t.Name, plannedPath{Path: m, Key: canonicalPath(m), glob: glob}})
+				claims = append(claims, pathClaim{t.Name, plannedPath{Path: m, Key: canonicalPath(m), glob: glob}})
 			}
 		}
 	}
@@ -892,7 +895,7 @@ func planTargetPaths(targets []Target) (map[string][]plannedPath, []string) {
 	owner := map[string]int{}
 	for i, c := range claims {
 		j, seen := owner[c.path.Key]
-		if !seen || (claims[j].path.glob && !c.path.glob && claims[j].target != c.target) {
+		if !seen || (claims[j].path.glob && !c.path.glob) {
 			owner[c.path.Key] = i
 		}
 	}
@@ -901,37 +904,58 @@ func planTargetPaths(targets []Target) (map[string][]plannedPath, []string) {
 		if owner[c.path.Key] != i {
 			continue
 		}
-		nestedInSameTarget := false
-		for key, j := range owner {
-			if claims[j].target == c.target && isWithin(c.path.Key, key) {
-				nestedInSameTarget = true
-				break
-			}
-		}
-		if nestedInSameTarget {
+		if redundantInOwnTarget(c.target, c.path.Key, claims, owner) {
 			continue
 		}
 		plans[c.target] = append(plans[c.target], c.path)
 	}
-	// Exclude other targets' nested paths from broader walks.
-	for target, paths := range plans {
+	var kept []string
+	for _, paths := range plans {
+		for _, p := range paths {
+			kept = append(kept, p.Key)
+		}
+	}
+	for _, paths := range plans {
 		for i := range paths {
-			for other, otherPaths := range plans {
-				if other == target {
-					continue
-				}
-				for _, o := range otherPaths {
-					if isWithin(o.Key, paths[i].Key) {
-						if paths[i].Exclude == nil {
-							paths[i].Exclude = map[string]bool{}
-						}
-						paths[i].Exclude[o.Key] = true
+			for _, key := range kept {
+				if isWithin(key, paths[i].Key) {
+					if paths[i].Exclude == nil {
+						paths[i].Exclude = map[string]bool{}
 					}
+					paths[i].Exclude[key] = true
 				}
 			}
 		}
 	}
 	return plans, warnings
+}
+
+// pathClaim is one target's claim on an expanded path.
+type pathClaim struct {
+	target string
+	path   plannedPath
+}
+
+// redundantInOwnTarget reports whether key is already measured by a broader
+// owned path of the same target, with no other target's owned path in between
+// (that path would be excluded from the broader walk, taking key with it).
+func redundantInOwnTarget(target, key string, claims []pathClaim, owner map[string]int) bool {
+	for outer, i := range owner {
+		if claims[i].target != target || !isWithin(key, outer) {
+			continue
+		}
+		between := false
+		for mid, j := range owner {
+			if claims[j].target != target && isWithin(key, mid) && isWithin(mid, outer) {
+				between = true
+				break
+			}
+		}
+		if !between {
+			return true
+		}
+	}
+	return false
 }
 
 // scanPlannedPaths measures a target's planned paths.
