@@ -955,3 +955,24 @@ func TestConfigIO_WriteAndLoad(t *testing.T) {
 		t.Fatalf("nested config not created: %v", err)
 	}
 }
+
+func TestFilesystemFreedLine(t *testing.T) {
+	if n, ok := volumeFreeBytes(t.TempDir()); !ok || n == 0 {
+		t.Fatalf("volumeFreeBytes = %d, %v", n, ok)
+	}
+	tests := []struct {
+		name          string
+		before, after uint64
+		want          string
+	}{
+		{"gained", 1 << 30, 3 << 30, "Filesystem free space: 1.00 GB -> 3.00 GB (+2.00 GB) on /home"},
+		{"lost", 3 << 30, 2 << 30, "Filesystem free space: 3.00 GB -> 2.00 GB (-1.00 GB) on /home"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := filesystemFreedLine("/home", tt.before, tt.after); got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

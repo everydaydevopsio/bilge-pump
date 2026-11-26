@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	yaml "gopkg.in/yaml.v3"
@@ -229,5 +231,81 @@ func TestMacCleanerJSONIsStructured(t *testing.T) {
 	var findings map[string][]map[string]any
 	if err := json.Unmarshal(report["findings"], &findings); err != nil || len(findings["integration"]) == 0 {
 		t.Fatalf("structured macOS findings missing: %v; output=%s", err, result.Output)
+	}
+}
+
+func TestCleanReportsFilesystemFreeSpaceDelta(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script as a fake task")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "git-cleaner"), []byte("#!/bin/sh\necho cleaned\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	calls := 0
+	old := freeBytes
+	freeBytes = func(string) (uint64, bool) {
+		calls++
+		if calls == 1 {
+			return 1000, true
+		}
+		return 4500, true
+	}
+	defer func() { freeBytes = old }()
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	code := runWithAgentSetup([]string{"--json", "clean", "git-cleaner"}, func() error { return nil })
+	_ = w.Close()
+	os.Stdout = oldStdout
+	out, _ := io.ReadAll(r)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	var report Report
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, out)
+	}
+	fs := report.FreeSpace
+	if fs == nil || fs.BeforeBytes != 1000 || fs.AfterBytes != 4500 || fs.FreedBytes != 3500 || fs.Path == "" {
+		t.Fatalf("free_space = %+v; want before 1000, after 4500, freed 3500", fs)
+	}
+}
+
+func TestScanOmitsFreeSpace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script as a fake task")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "git-cleaner"), []byte("#!/bin/sh\necho '{}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	runWithAgentSetup([]string{"--json", "git-cleaner"}, func() error { return nil })
+	_ = w.Close()
+	os.Stdout = oldStdout
+	out, _ := io.ReadAll(r)
+	if strings.Contains(string(out), "free_space") {
+		t.Fatalf("dry run reported free_space: %s", out)
+	}
+}
+
+func TestFreeBytesReadsRealFilesystem(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("not implemented on Windows")
+	}
+	if n, ok := freeBytes(t.TempDir()); !ok || n == 0 {
+		t.Fatalf("freeBytes = %d, %v", n, ok)
 	}
 }

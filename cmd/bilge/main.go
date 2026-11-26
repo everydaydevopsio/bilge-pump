@@ -43,7 +43,22 @@ type Report struct {
 	When    time.Time    `json:"when"`
 	DryRun  bool         `json:"dry_run"`
 	Tasks   []TaskResult `json:"tasks"`
+	// FreeSpace is the change in free space on the home filesystem across a
+	// clean. It catches work outside measured paths (e.g. brew cleanup) and
+	// shows when freed space stays inside a VM (Docker runtimes).
+	FreeSpace *FreeSpaceDelta `json:"free_space,omitempty"`
 }
+
+// FreeSpaceDelta is the free space on one filesystem before and after a clean.
+type FreeSpaceDelta struct {
+	Path        string `json:"path"`
+	BeforeBytes uint64 `json:"before_bytes"`
+	AfterBytes  uint64 `json:"after_bytes"`
+	FreedBytes  int64  `json:"freed_bytes"`
+}
+
+// freeBytes is replaceable in tests.
+var freeBytes = statfsFreeBytes
 
 func configPath() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) && runtime.GOOS != "windows" {
@@ -341,6 +356,13 @@ func runWithAgentSetup(args []string, setupAgents func() error) int {
 		fmt.Fprintln(os.Stderr, "argument error:", err)
 		return 1
 	}
+	var freeSpace *FreeSpaceDelta
+	if clean {
+		home, _ := os.UserHomeDir()
+		if before, ok := freeBytes(home); ok {
+			freeSpace = &FreeSpaceDelta{Path: home, BeforeBytes: before}
+		}
+	}
 	results := make([]TaskResult, 0, len(selected))
 	for _, task := range selected {
 		if task == "" {
@@ -348,11 +370,22 @@ func runWithAgentSetup(args []string, setupAgents func() error) int {
 		}
 		results = append(results, runTask(task, taskArgs[task], jsonMode))
 	}
+	if freeSpace != nil {
+		if after, ok := freeBytes(freeSpace.Path); ok {
+			freeSpace.AfterBytes = after
+			freeSpace.FreedBytes = int64(after) - int64(freeSpace.BeforeBytes)
+		} else {
+			freeSpace = nil
+		}
+	}
 	if jsonMode {
-		report := Report{Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH, When: time.Now().UTC(), DryRun: !clean, Tasks: results}
+		report := Report{FreeSpace: freeSpace, Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH, When: time.Now().UTC(), DryRun: !clean, Tasks: results}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(report)
+	}
+	if !jsonMode && freeSpace != nil {
+		fmt.Printf("\nFilesystem free space on %s: %s -> %s (%+.2f GB)\n", freeSpace.Path, gib(freeSpace.BeforeBytes), gib(freeSpace.AfterBytes), float64(freeSpace.FreedBytes)/(1<<30))
 	}
 	if !jsonMode {
 		for _, r := range results {
@@ -363,6 +396,8 @@ func runWithAgentSetup(args []string, setupAgents func() error) int {
 	}
 	return exitCode(results)
 }
+
+func gib(n uint64) string { return fmt.Sprintf("%.2f GB", float64(n)/(1<<30)) }
 
 func parseBooleanFlag(value string, hasValue bool) (bool, error) {
 	if !hasValue {

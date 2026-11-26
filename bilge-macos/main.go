@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/olekukonko/tablewriter"
@@ -106,6 +107,24 @@ type Target struct {
 	Paths   []string   `yaml:"paths"` // measured for size only
 	Cmds    [][]string `yaml:"cmds"`  // commands to run when --clean is set
 	Tools   []Tool     `yaml:"tools"` // required tools for this target
+}
+
+// volumeFreeBytes returns the bytes available on the filesystem holding path.
+func volumeFreeBytes(path string) (uint64, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, false
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), true
+}
+
+func filesystemFreedLine(path string, before, after uint64) string {
+	delta := int64(after) - int64(before)
+	sign := "+"
+	if delta < 0 {
+		sign, delta = "-", -delta
+	}
+	return fmt.Sprintf("Filesystem free space: %s -> %s (%s%s) on %s", human(int64(before)), human(int64(after)), sign, human(delta), path)
 }
 
 // ----- Report types -----
@@ -1224,6 +1243,7 @@ func run() int {
 	// Now run commands if --clean is specified
 	partialFailure := false
 	if *flagClean {
+		freeBefore, haveFreeBefore := volumeFreeBytes(home())
 		for _, t := range targets {
 			for _, c := range t.Cmds {
 				result := runCmd(c)
@@ -1344,6 +1364,11 @@ func run() int {
 		}
 		if totalFreed > 0 {
 			fmt.Printf("Total space freed: %s\n", human(totalFreed))
+		}
+		// Per-path deltas miss work outside measured paths and overstate
+		// space freed inside a VM; the filesystem delta is what the user gets.
+		if freeAfter, ok := volumeFreeBytes(home()); ok && haveFreeBefore {
+			fmt.Println(filesystemFreedLine(home(), freeBefore, freeAfter))
 		}
 	}
 	if len(rep.Warnings) > 0 {

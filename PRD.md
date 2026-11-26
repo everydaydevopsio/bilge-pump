@@ -40,6 +40,7 @@ Ship one unified `bilge` command for macOS, Linux, and Windows. The release bund
 ### CLI and behavior
 - `bilge scan` reports findings across tasks without changing files.
 - `bilge clean --all` runs platform-appropriate cleanup tasks; `bilge clean <task>` or `bilge <task>` selects one task.
+- `bilge clean` measures free space on the home filesystem before and after the tasks (`statfs`) and reports the change: a text line, and `free_space` (`path`, `before_bytes`, `after_bytes`, `freed_bytes`) in the JSON envelope. This catches work outside measured paths (e.g. `brew cleanup` removing portable Ruby and logs) and shows when space freed inside a VM (Docker runtimes) has not returned to the host. Omitted on Windows and in dry runs.
 - Individual legacy tools remain available for compatibility.
 - One shared JSON report schema and exit-code convention apply to unified orchestration.
 - `bilge scan --json` emits a valid JSON envelope with each selected task's structured report; task progress stays on stderr.
@@ -158,6 +159,7 @@ targets:
 - Item count tracking
 - Latest modification time per path
 - Command availability detection
+- After `--clean`, prints the home filesystem's free-space change next to the per-target "freed" totals
 - JSON output for programmatic processing
 - Warnings for glob errors
 - Before/after comparison when `--clean` is used
