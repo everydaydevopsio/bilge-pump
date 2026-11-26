@@ -1068,3 +1068,38 @@ func TestPipProbeIgnoresModulesInWorkingDirectory(t *testing.T) {
 		t.Fatal("a pip.py in the working directory was executed by the pip probe")
 	}
 }
+
+func TestRunJSONReportsPipSkip(t *testing.T) {
+	oldJSON := *flagJSON
+	defer func() { *flagJSON = oldJSON }()
+	fakePython(t, "19.2.3")
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	cfgYAML := "version: 1\noptions: {}\ntargets:\n  - name: python\n    enabled: true\n    paths: [\"" + tmpDir + "\"]\n    cmds: [[\"pip\", \"cache\", \"purge\"]]\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"bilge-macos", "--config", cfgPath, "--json", "--targets", "python"}
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	code := run()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if code != 0 {
+		t.Fatalf("run() = %d: %s", code, out)
+	}
+	var rep Report
+	if err := json.Unmarshal(out, &rep); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, out)
+	}
+	if got := rep.Commands["python"]; len(got) != 1 || !strings.Contains(got[0].Error, "older than 20.1") {
+		t.Fatalf("commands[python] = %+v, want the pip skip", got)
+	}
+	if len(rep.Warnings) == 0 || !strings.Contains(strings.Join(rep.Warnings, "\n"), "older than 20.1") {
+		t.Fatalf("warnings = %q, want the pip skip", rep.Warnings)
+	}
+}

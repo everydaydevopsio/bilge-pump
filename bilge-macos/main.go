@@ -1148,6 +1148,9 @@ func run() int {
 	}
 
 	beforeTotals := runFirstScan(targets, &rep)
+	// Planned commands are part of the report in every mode, so a dry run
+	// shows exactly what clean would run.
+	populateCommands(targets, &rep)
 
 	// output initial results
 	if *flagJSON {
@@ -1161,8 +1164,6 @@ func run() int {
 	fmt.Printf("Config: %s\n", *flagConfig)
 	fmt.Printf("Scan: %s\n", rep.When.Format(time.RFC3339))
 	fmt.Printf("Dry-run: %v\n\n", rep.DryRun)
-
-	populateCommands(targets, &rep)
 
 	// Show initial scan results (summary by default; detailed with --details)
 	type kv struct {
