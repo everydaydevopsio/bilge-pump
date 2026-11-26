@@ -786,7 +786,7 @@ func defaultConfig() Config {
 			{Name: "php", Enabled: true, Priority: 5, Patterns: []string{"vendor"}, Signatures: []string{"composer.json", "composer.lock"}},
 			{Name: "ruby", Enabled: true, Priority: 5, Patterns: []string{"vendor/bundle"}, Signatures: []string{"Gemfile", "Gemfile.lock", "Rakefile"}},
 			{Name: "dotnet", Enabled: true, Priority: 5, Patterns: []string{"bin", "obj"}, Signatures: []string{"*.csproj", "*.sln", "*.fsproj", "*.vbproj", "project.json"}},
-			{Name: "cpp", Enabled: true, Priority: 5, Patterns: []string{"cmake-build-*"}, Signatures: []string{"CMakeLists.txt", "Makefile", "configure", "configure.ac"}},
+			{Name: "cpp", Enabled: true, Priority: 20, Patterns: []string{"cmake-build-*"}, Signatures: []string{"CMakeLists.txt", "Makefile", "configure", "configure.ac"}},
 			{Name: "flutter", Enabled: true, Priority: 5, Patterns: []string{"build", ".dart_tool"}, Signatures: []string{"pubspec.yaml", "pubspec.lock"}},
 		},
 	}
@@ -897,8 +897,11 @@ func main() {
 	}
 	scanPath = expand(scanPath)
 
-	// Determine max depth
+	// Determine max depth. Without --depth, Git repositories are also
+	// discovered (up to repoDiscoveryDepth below the scan path) and scanned
+	// from their own roots, so ~/src/<org>/<repo> layouts are covered.
 	maxDepth := cfg.Options.MaxDepth
+	discover := *flagDepth <= 0
 	if *flagDepth > 0 {
 		maxDepth = *flagDepth
 	}
@@ -997,7 +1000,12 @@ func main() {
 	if cfg.Options.DetectLanguage {
 		_, _ = fmt.Fprintln(progress, "Language detection enabled - scanning with language-specific patterns")
 	}
-	findings := scanDirectory(scanPath, maxDepth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns, filters)
+	if discover {
+		_, _ = fmt.Fprintf(progress, "Discovering Git repositories up to depth %d (pass --depth to scan by depth only)...\n", repoDiscoveryDepth)
+	}
+	findings := scanProjects(scanPath, maxDepth, discover, allPatterns, func(root string, depth int) []Finding {
+		return scanDirectory(root, depth, allPatterns, patternToLang, cfg.Options.DetectLanguage, langSignatures, langPriorities, langToPatterns, filters)
+	})
 	rep.Findings = findings
 
 	var total int64
@@ -1222,6 +1230,93 @@ func bytesFreed(before, after int64) int64 {
 		return 0
 	}
 	return before - after
+}
+
+const (
+	// repoDiscoveryDepth bounds how far below the scan path a repository root
+	// may sit (~/src/<org>/<group>/<repo> is depth 3).
+	repoDiscoveryDepth = 4
+	// repoScanDepth is the minimum depth scanned inside each discovered
+	// repository, enough for monorepo caches such as apps/web/node_modules.
+	repoScanDepth = 3
+)
+
+// discoverGitRepos returns directories at most maxDepth levels below root that
+// contain a .git directory or file (worktrees, submodules), sorted. It does
+// not descend into .git or into directories matching skip (cache patterns).
+func discoverGitRepos(root string, maxDepth int, skip []string) []string {
+	root = filepath.Clean(root)
+	var repos []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if path != root {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			for _, pattern := range skip {
+				if matchPattern(d.Name(), pattern) {
+					return filepath.SkipDir
+				}
+			}
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(rel, string(filepath.Separator)) + 1
+		}
+		if depth > maxDepth {
+			return filepath.SkipDir
+		}
+		if path != root {
+			if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+				repos = append(repos, path)
+			}
+		}
+		return nil
+	})
+	sort.Strings(repos)
+	return repos
+}
+
+// scanProjects scans root to maxDepth and, when discover is set, also scans
+// each discovered Git repository from its own root (at least repoScanDepth
+// deep). Findings are de-duplicated by path; the first scan to report a path
+// wins.
+func scanProjects(root string, maxDepth int, discover bool, patterns []string, scan func(root string, depth int) []Finding) []Finding {
+	findings := scan(root, maxDepth)
+	if !discover {
+		return findings
+	}
+	seen := make(map[string]bool, len(findings))
+	for _, f := range findings {
+		seen[filepath.Clean(f.Path)] = true
+	}
+	depth := maxDepth
+	if depth < repoScanDepth {
+		depth = repoScanDepth
+	}
+	for _, repo := range discoverGitRepos(root, repoDiscoveryDepth, patterns) {
+		for _, f := range scan(repo, depth) {
+			key := filepath.Clean(f.Path)
+			if seen[key] {
+				continue
+			}
+			// A repository scan reports the repo's subdirectories without
+			// caches as "no language found"; the root scan already covers
+			// project rows, so keep only caches from repository scans.
+			if f.Pattern == "" {
+				continue
+			}
+			seen[key] = true
+			findings = append(findings, f)
+		}
+	}
+	return findings
 }
 
 // detectLanguage checks a directory for language signature files and returns the detected language name
@@ -1587,6 +1682,15 @@ func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patt
 				// Skip subdirectories of matched directories
 				return filepath.SkipDir
 			}
+		}
+
+		// A directory named like a cache that was not selected (another
+		// language's pattern, e.g. node_modules in a repo detected as C++ from
+		// its Makefile) is still a dependency tree, not the user's projects.
+		// Walking into it finds hundreds of nested caches such as pnpm's
+		// node_modules/.pnpm/*/node_modules, so skip it.
+		if matchesCachePattern && len(includePathPatterns) == 0 {
+			return filepath.SkipDir
 		}
 
 		// Only report "no language found" at max depth if we didn't match a pattern
