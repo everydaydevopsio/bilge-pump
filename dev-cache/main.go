@@ -761,6 +761,43 @@ func getLanguageForExclusion(detectedLang string, isExcluded bool) string {
 	return detectedLang
 }
 
+// unknownLanguage labels a cache whose project has no detected signature and
+// whose pattern is shared by several languages.
+const unknownLanguage = "unknown"
+
+// buildLanguageMaps derives the scan lookup tables from the selected languages.
+func buildLanguageMaps(languages []Language) (allPatterns []string, patternToLang map[string]string, langSignatures map[string][]string, langPriorities map[string]int, langToPatterns map[string][]string) {
+	patternToLang = make(map[string]string)
+	langSignatures = make(map[string][]string)
+	langPriorities = make(map[string]int)
+	langToPatterns = make(map[string][]string)
+	for _, lang := range languages {
+		for _, pattern := range lang.Patterns {
+			// A pattern shared by several languages (node_modules, build, target)
+			// says nothing about the project; label it from its signature instead.
+			if owner, ok := patternToLang[pattern]; ok {
+				if owner != lang.Name {
+					patternToLang[pattern] = unknownLanguage
+				}
+				continue
+			}
+			allPatterns = append(allPatterns, pattern)
+			patternToLang[pattern] = lang.Name
+		}
+		if len(lang.Signatures) > 0 {
+			langSignatures[lang.Name] = lang.Signatures
+		}
+		// Use priority from config, default to 5 if not set (0 means not set in YAML)
+		priority := lang.Priority
+		if priority == 0 {
+			priority = 5
+		}
+		langPriorities[lang.Name] = priority
+		langToPatterns[lang.Name] = lang.Patterns
+	}
+	return allPatterns, patternToLang, langSignatures, langPriorities, langToPatterns
+}
+
 // ----- Config IO -----
 
 func defaultConfig() Config {
@@ -935,11 +972,6 @@ func main() {
 	}
 
 	var languages []Language
-	var allPatterns []string
-	patternToLang := make(map[string]string)
-	langSignatures := make(map[string][]string)
-	langPriorities := make(map[string]int)
-	langToPatterns := make(map[string][]string)
 	for _, lang := range cfg.Languages {
 		if !lang.Enabled {
 			continue
@@ -948,22 +980,8 @@ func main() {
 			continue
 		}
 		languages = append(languages, lang)
-		for _, pattern := range lang.Patterns {
-			allPatterns = append(allPatterns, pattern)
-			patternToLang[pattern] = lang.Name
-		}
-		// Build language signature, priority, and pattern maps
-		if len(lang.Signatures) > 0 {
-			langSignatures[lang.Name] = lang.Signatures
-		}
-		// Use priority from config, default to 5 if not set (0 means not set in YAML)
-		priority := lang.Priority
-		if priority == 0 {
-			priority = 5
-		}
-		langPriorities[lang.Name] = priority
-		langToPatterns[lang.Name] = lang.Patterns
 	}
+	allPatterns, patternToLang, langSignatures, langPriorities, langToPatterns := buildLanguageMaps(languages)
 
 	if len(languages) == 0 {
 		fmt.Println("No languages selected.")
@@ -1324,6 +1342,30 @@ func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patt
 	findingsByPath := make(map[string]bool)
 	// Track excluded directories (will be reported with empty language)
 	excludedDirs := make(map[string]bool)
+	// nearestLanguage returns the language of the closest directory at or above
+	// dir, up to and including the scan root, with a signature. Caches take
+	// their nearest project's language, so root/<org>/<repo>/node_modules gets
+	// the repo's language and a Python service inside a Node monorepo is Python.
+	rootPrefix := root
+	if !strings.HasSuffix(rootPrefix, string(filepath.Separator)) {
+		rootPrefix += string(filepath.Separator)
+	}
+	nearestLanguage := func(dir string) (string, string) {
+		for p := dir; p == root || strings.HasPrefix(p, rootPrefix); p = filepath.Dir(p) {
+			lang, ok := langCache[p]
+			if !ok {
+				lang = detectLanguage(p, langSignatures, langPriorities)
+				langCache[p] = lang
+			}
+			if lang != "" {
+				return lang, p
+			}
+			if p == root {
+				break
+			}
+		}
+		return "", ""
+	}
 	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // Continue on errors
@@ -1530,6 +1572,14 @@ func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patt
 				}
 			}
 
+			// The nearest enclosing signature decides this directory's language
+			// and project, overriding a match at a more distant ancestor.
+			if !isExcluded && !excludedDirs[projectRoot] {
+				if lang, signatureRoot := nearestLanguage(filepath.Dir(cleanPath)); lang != "" {
+					detectedLang, projectRoot = lang, signatureRoot
+				}
+			}
+
 			// If language detected, use only patterns for that language
 			if detectedLang != "" {
 				if langPatterns, ok := langToPatterns[detectedLang]; ok {
@@ -1559,11 +1609,14 @@ func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patt
 					f.Err = err.Error()
 				}
 				f.Pattern = pattern
-				// Use detected language when available; patternToLang can be wrong when
-				// multiple languages share a pattern (e.g. node_modules in node, nextjs, vue)
-				if detectLang && detectedLang != "" {
+				// With detection on, the label comes only from a project signature;
+				// a pattern alone (bin, node_modules) does not identify the language.
+				switch {
+				case detectLang && detectedLang != "":
 					f.Language = detectedLang
-				} else {
+				case detectLang:
+					f.Language = unknownLanguage
+				default:
 					f.Language = patternToLang[pattern]
 				}
 				// Set project root to where language was detected, or parent if no language detection
