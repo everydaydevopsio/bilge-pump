@@ -28,7 +28,7 @@ Steps in order, oldest first.
 | 3 | `bilge scan --json` | CLI dry run | 2m54s. 92 KB JSON on stdout **and** 68 KB duplicate JSON on stderr. macOS total 104.2 GB. dev-cache 0 B (depth 1). git-cleaner 3.7 GB | — |
 | 4 | `bilge dev-cache --depth 3 --json` | CLI dry run | 32s. 5.4 GB in 82 dirs | — |
 | 5 | `bilge bilge-macos --clean --targets npm,pnpm,go,python,python-uv,brew --json` | CLI clean | 3m15s, **exit 3**. Bilge reported 1.65 GB freed; `df` showed +3.25 GB. `pip cache purge` failed. `output` field is a text table, not structured JSON | 3.25 GB |
-| 6 | `docker builder prune -af` | Docker directly (Bilge's docker target would also prune volumes) | 5.1 GB build cache removed inside the OrbStack VM | ~0 GB |
+| 6 | `docker builder prune -af` | Docker directly (the stale config listed `--volumes` for Bilge's docker target; see the F2 correction) | 5.1 GB build cache removed inside the OrbStack VM | ~0 GB |
 | 7 | `bilge dev-cache --depth 3 --min-age 30d --clean --yes` | CLI clean | **exit 3**. 35 dirs deleted (345 MB, dry run said 425 MB); 6 skipped by the Git safety check | 0.35 GB |
 | 8 | `rm -rf ~/.gradle/caches ~/Library/Developer/Xcode/DerivedData` | Shell (Bilge has no clean command for these) | — | 5.6 GB |
 | 9 | `bilge bilge-macos --json --targets ...` | CLI rescan | npm 2.37→2.00 GB, pnpm 1.01→0.61, go 0.51→0, uv 0.24→0, gradle 5.5→0.5, xcode 0.52→0, docker 37.9→32.8 | — |
@@ -65,11 +65,15 @@ The user config is a full snapshot of defaults from an older release. Built-in d
 
 At scan time there were 16.4 GB of Docker volumes (88 total, 2 active), likely dev databases.
 
+> **Correction (code review, 2026-11-26):** these entries were read from the config file, not from what would execute. On v2.2.3, `loadConfigWithDefaults` already drops docker `--volumes` (unless `--docker-prune` or `options.dockerPruneByDefault: true`), puppeteer's `sh -c` install command and android's `sdkmanager --update` from *any* config before running it. So the stale config would not have pruned volumes. The remaining F2 problems: stale configs silently diverge from defaults (`ollama list`, notes, new targets and fixes that aren't filtered), and safety depends on a hard-coded filter list rather than the config model.
+
 ### F3 — Docker cleanup ignores the active context and runtime (P0)
 
 `docker context ls` showed `ssh://` contexts. Bilge runs `docker ... prune` against whatever context is active and never shows it. Docker paths assume Docker Desktop (`~/Library/Containers/com.docker.docker/...Docker.raw` did not exist). OrbStack data (`~/Library/Group Containers/*.dev.orbstack/data`, 37 GB) was not recognised. Space freed inside a VM does not return to the host right away; Bilge doesn't say so.
 
 ### F4 — Android "clean" command updates the SDK (P0)
+
+> **Correction (code review, 2026-11-26):** `sdkmanager --update` is still listed in the built-in default and in generated configs, but `loadConfigWithDefaults` drops it before any command runs, so it does not execute. What remains is the config entry and the SDK/AVD sizes being counted as cache.
 
 The android target runs `sdkmanager --update`, which downloads updates and frees nothing. The 20.8 GB SDK and 10.5 GB of AVDs are counted as cache.
 

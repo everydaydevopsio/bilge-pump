@@ -9,7 +9,7 @@ mode: mixed (Phase 1 autonomous; Phases 2-3 approval-required)
 # MAP-0064 — Fix issues found in the Claude Code field test
 
 ## Context
-A Claude Code session used Bilge v2.2.3 to free disk space on a developer Mac. The MCP server rejected every call, several targets report space they cannot clean, and a stale user config would have pruned Docker volumes. Evidence, repro commands and the session log are in [docs/reports/2026-11-26-claude-code-field-test.md](../reports/2026-11-26-claude-code-field-test.md). Finding IDs (F1–F17) below refer to that report.
+A Claude Code session used Bilge v2.2.3 to free disk space on a developer Mac. The MCP server rejected every call, several targets report space they cannot clean, and a stale user config diverges from today's safer defaults (its destructive entries are currently neutralised only by a hard-coded load-time filter; see the corrections in the report). Evidence, repro commands and the session log are in [docs/reports/2026-11-26-claude-code-field-test.md](../reports/2026-11-26-claude-code-field-test.md). Finding IDs (F1–F17) below refer to that report.
 
 ## Agent start here
 1. `git checkout main && git pull --ff-only`. Line references assume `main` at or after `06a65b1` (v2.2.3).
@@ -34,7 +34,7 @@ Much of this overlaps existing priorities. Don't open duplicate issues; comment 
 | F17 Coverage gaps | #54, #80, `PRIORITIES.md` P2 (largest-items report) |
 | F2 Config drift | `TODO.md` "Centralize config schema/version guidance" |
 
-`PRIORITIES.md` looks stale: its P0 boxes for the Git-tracked refusal and for preserving Docker volumes are unchecked, yet `main` already skips Git-tracked dirs (observed in the field test) and the built-in docker default no longer uses `--volumes`. Verify both and tick them in the first PR. Note that the docker fix doesn't reach existing users until P2-1 (F2) lands.
+`PRIORITIES.md` looks stale: its P0 boxes for the Git-tracked refusal and for preserving Docker volumes are unchecked, yet `main` already skips Git-tracked dirs (observed in the field test) and the built-in docker default no longer uses `--volumes`. Verify both and tick them in the first PR. Existing users' configs still *list* `--volumes`, but `loadConfigWithDefaults` already drops it (and `sdkmanager --update` and puppeteer's `sh -c`) before execution unless volume pruning is opted in. P2-1 replaces that hard-coded filter with the config model.
 
 ## Scope
 - In scope: F1–F16 in this repository.
@@ -69,9 +69,9 @@ Much of this overlaps existing priorities. Don't open duplicate issues; comment 
 - [ ] **P1-7 (F16) Small UX.** Hide 0 B rows in the dev-cache table unless `--all`; support `bilge help <task>`. Tests for both.
 
 ### Phase 2 — Approval-required (needs the decision noted)
-- [ ] **P2-1 (F2, D1) Config model.** Implement D1, including migration of existing full configs and a scan-time warning while a config still overrides a default with a destructive command. Acceptance: an old config with `--volumes` in docker produces a warning on scan and the migrated config keeps volumes.
+- [ ] **P2-1 (F2, D1) Config model.** Implement D1, including migration of existing full configs and a scan-time warning while a config still overrides a default with a destructive command. Acceptance: an old config with `--volumes` in docker produces a warning on scan and the migrated config keeps volumes. Keep or replace the existing `loadConfigWithDefaults` filters deliberately; don't drop them silently.
 - [ ] **P2-2 (F3, D2) Docker safety.** Show active context name and endpoint in scan output and JSON. Apply D2 for non-local endpoints. Detect OrbStack (and Colima) data dirs for measurement. After pruning, report that VM space returns to the host later. Volume pruning only behind an explicit flag, with a per-volume list in dry run.
-- [ ] **P2-3 (F4) Android.** Remove `sdkmanager --update`. Make the target informational: list AVDs and system images with sizes, and print `avdmanager delete avd -n <name>` hints.
+- [ ] **P2-3 (F4) Android.** Remove `sdkmanager --update` from the default and generated config (it is already filtered at load and never runs). Make the target informational: list AVDs and system images with sizes, and print `avdmanager delete avd -n <name>` hints.
 - [ ] **P2-4 (F5, D3) Brew autoremove.** Implement D3.
 - [ ] **P2-5 (F6, D4) Exit codes.** Implement D4 across `bilge`, `dev-cache`, `git-cleaner`, `bilge-macos`. Document the codes in `README.md` and `docs/scheduling.md`. Put skips and errors in separate JSON fields.
 - [ ] **P2-6 (F7, D5) Cleanable vs measured.** Add `action` (`command` | `delete-paths` | `informational`) and `cleanable_bytes` to each target finding. Totals and the MCP summary report cleanable bytes, with informational shown separately. If D5 = yes, add `delete-paths` for Gradle caches (after `gradle --stop`), Xcode DerivedData, Terraform plugin cache and `~/.npm/_npx`. For git-cleaner, estimate `gc` savings from `git count-objects -v` instead of total `.git` size.
