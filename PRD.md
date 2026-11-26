@@ -248,7 +248,7 @@ A cross-platform Go CLI tool that scans source code directories to find and opti
 - `--yes` skips confirmation prompt for cleanup
 - `--json` outputs results as JSON
 - `--details` shows detailed per-project breakdown
-- `--all` shows projects with 0 B of cache in the table; by default they are hidden and counted in a line under the table. JSON output always includes every finding. `bilge dev-cache --all` and `bilge scan --all` forward it to dev-cache (in `bilge clean`, `--all` still selects every task).
+- `--all` shows projects with 0 B of cache in the table; by default they are hidden and counted in a line under the table. JSON output always includes every finding. `bilge dev-cache --all[=BOOL]` and `bilge scan --all[=BOOL]` forward it to dev-cache, including with `--clean` on a single task; only in the `bilge clean` subcommand does `--all` still select every task.
 
 #### Configuration Structure
 ```yaml

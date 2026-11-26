@@ -338,9 +338,16 @@ func runWithAgentSetup(args []string, setupAgents func() error) int {
 		}
 	}
 	clean := cleanupRequested(command, forceCleanSet, forceClean, extra)
-	// In clean, --all selects every task. Otherwise it is dev-cache's
-	// "show 0 B projects" flag.
-	showAll := !clean && containsArg(extra, "--all")
+	// In the clean subcommand, --all selects every task. Otherwise it is
+	// dev-cache's "show 0 B projects" flag, including `bilge dev-cache --clean`.
+	showAll := false
+	if command != "clean" {
+		showAll, extra, err = takeShowAll(extra)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid --all value:", err)
+			return 1
+		}
+	}
 	extra = withoutArgs(extra, "--all", "--clean")
 	taskArgs, err := planTaskArgs(selected, extra, clean, cfg.ScanPath, yes)
 	if err != nil {
@@ -454,6 +461,25 @@ func planTaskArgs(tasks, extra []string, clean bool, scanPath string, yes bool) 
 		planned[task] = child
 	}
 	return planned, nil
+}
+
+// takeShowAll removes --all / --all=BOOL from args and returns its value.
+func takeShowAll(args []string) (bool, []string, error) {
+	show := false
+	rest := make([]string, 0, len(args))
+	for _, arg := range args {
+		key, value, hasValue := strings.Cut(arg, "=")
+		if key != "--all" {
+			rest = append(rest, arg)
+			continue
+		}
+		parsed, err := parseBooleanFlag(value, hasValue)
+		if err != nil {
+			return false, nil, err
+		}
+		show = parsed
+	}
+	return show, rest, nil
 }
 
 // withShowAll forwards --all to dev-cache, the only task with that flag.

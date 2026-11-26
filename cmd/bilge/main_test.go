@@ -300,3 +300,33 @@ func TestScanAllFlagReachesOnlyDevCache(t *testing.T) {
 		t.Fatalf("--all added without being requested: %v", got)
 	}
 }
+
+func TestAllFlagForwardingThroughCLI(t *testing.T) {
+	fakeTask(t, "dev-cache")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	tests := []struct {
+		name    string
+		args    []string
+		code    int
+		wantAll bool
+	}{
+		{"bare", []string{"dev-cache", "--all"}, 0, true},
+		{"explicit true", []string{"dev-cache", "--all=true"}, 0, true},
+		{"explicit false", []string{"dev-cache", "--all=false"}, 0, false},
+		{"task clean keeps display flag", []string{"dev-cache", "--clean", "--all"}, 0, true},
+		{"invalid value", []string{"dev-cache", "--all=maybe"}, 1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, out := captureStdout(t, func() int {
+				return runWithAgentSetup(tt.args, func() error { return nil })
+			})
+			if code != tt.code {
+				t.Fatalf("bilge %v exit = %d, want %d: %s", tt.args, code, tt.code, out)
+			}
+			if got := strings.Contains(out, "--all"); got != tt.wantAll {
+				t.Fatalf("bilge %v forwarded --all = %v, want %v: %s", tt.args, got, tt.wantAll, out)
+			}
+		})
+	}
+}
