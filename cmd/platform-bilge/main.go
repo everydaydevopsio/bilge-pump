@@ -302,6 +302,10 @@ func targetCommand(executable string, args []string) (*exec.Cmd, error) {
 	return exec.Command(executable, args...), nil
 }
 
+// reportTime is the `when` of a JSON report: local time with its UTC offset,
+// in whole seconds. Every Bilge binary formats `when` this way.
+func reportTime() time.Time { return time.Now().Truncate(time.Second) }
+
 func main() { os.Exit(run()) }
 func run() int {
 	for _, arg := range os.Args[1:] {
@@ -381,7 +385,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "target selection error:", err)
 		return 1
 	}
-	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, When: time.Now().UTC(), DryRun: !*clean, Version: version, Findings: map[string][]Finding{}, Totals: map[string]int64{}, PlannedCommands: map[string][][]string{}, TargetStatus: map[string]string{}}
+	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, When: reportTime(), DryRun: !*clean, Version: version, Findings: map[string][]Finding{}, Totals: map[string]int64{}, PlannedCommands: map[string][][]string{}, TargetStatus: map[string]string{}}
 	if hostname, err := os.Hostname(); err == nil {
 		rep.Hostname = hostname
 	}

@@ -214,6 +214,10 @@ func ensureDir(p string) error { return os.MkdirAll(filepath.Dir(p), 0o755) }
 func home() string           { h, _ := os.UserHomeDir(); return h }
 func expand(p string) string { return os.ExpandEnv(strings.ReplaceAll(p, "~", home())) }
 
+// reportTime is the `when` of a JSON report: local time with its UTC offset,
+// in whole seconds. Every Bilge binary formats `when` this way.
+func reportTime() time.Time { return time.Now().Truncate(time.Second) }
+
 func checkVersionFlag() bool {
 	for _, arg := range os.Args[1:] {
 		if arg == "-version" || arg == "--version" {
@@ -803,17 +807,16 @@ func populateCommands(targets []Target, rep *Report) {
 			found := false
 			errorMsg := ""
 
+			// found uses the same PATH lookup as runCmd, so it says whether
+			// clean can execute the command. A tool detected another way (e.g.
+			// nvm via CheckPath, a shell function) is still not executable.
 			if len(c) > 0 {
-				if installed, ok := toolStatus[c[0]]; ok {
-					found = installed
-					if !installed {
+				_, err := exec.LookPath(c[0])
+				found = err == nil
+				if !found {
+					errorMsg = "not found"
+					if installed, ok := toolStatus[c[0]]; ok && !installed {
 						errorMsg = fmt.Sprintf("tool '%s' not installed", c[0])
-					}
-				} else {
-					_, err := exec.LookPath(c[0])
-					found = err == nil
-					if !found {
-						errorMsg = "not found"
 					}
 				}
 			}
@@ -1069,7 +1072,7 @@ func run() int {
 		return 0
 	}
 
-	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, Version: version, When: time.Now(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
+	rep := Report{OS: runtime.GOOS, Arch: runtime.GOARCH, DryRun: !*flagClean, Version: version, When: reportTime(), Totals: map[string]uint64{}, Findings: map[string][]Finding{}, Commands: map[string][]CmdResult{}, Warnings: []string{}}
 	if h, _ := os.Hostname(); h != "" {
 		rep.Hostname = h
 	}
@@ -1090,6 +1093,9 @@ func run() int {
 	}
 
 	beforeTotals := runFirstScan(targets, &rep)
+	// Planned commands are part of the report in every mode, so a dry run
+	// shows exactly what clean would run.
+	populateCommands(targets, &rep)
 
 	// output initial results
 	if *flagJSON {
@@ -1103,8 +1109,6 @@ func run() int {
 	fmt.Printf("Config: %s\n", *flagConfig)
 	fmt.Printf("Scan: %s\n", rep.When.Format(time.RFC3339))
 	fmt.Printf("Dry-run: %v\n\n", rep.DryRun)
-
-	populateCommands(targets, &rep)
 
 	// Show initial scan results (summary by default; detailed with --details)
 	type kv struct {

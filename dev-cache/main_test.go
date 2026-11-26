@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -1951,4 +1953,18 @@ func TestScanDirectoryWalkError(t *testing.T) {
 	findings := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{})
 	// Should not panic; may or may not find things depending on walk behavior
 	_ = findings
+}
+
+func TestReportTimeIsLocalWholeSeconds(t *testing.T) {
+	when := reportTime()
+	if when.Location() != time.Local || when.Nanosecond() != 0 {
+		t.Fatalf("reportTime() = %v; want local time in whole seconds", when)
+	}
+	b, err := json.Marshal(Report{When: when})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`"when":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)"`).Match(b) {
+		t.Fatalf("when not RFC 3339 with offset: %s", b)
+	}
 }

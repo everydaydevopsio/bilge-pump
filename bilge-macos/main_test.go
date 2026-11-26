@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -953,5 +955,63 @@ func TestConfigIO_WriteAndLoad(t *testing.T) {
 	}
 	if _, err := os.Stat(nestedPath); err != nil {
 		t.Fatalf("nested config not created: %v", err)
+	}
+}
+
+func TestRunJSONIncludesPlannedCommandsAndOffsetTime(t *testing.T) {
+	oldJSON := *flagJSON
+	defer func() { *flagJSON = oldJSON }()
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	cfgYAML := "version: 1\noptions: {}\ntargets:\n  - name: test\n    enabled: true\n    paths: [\"" + strings.ReplaceAll(tmpDir, "\\", "\\\\") + "\"]\n    cmds: [[\"true\"]]\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"bilge-macos", "--config", cfgPath, "--json", "--targets", "test"}
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	code := run()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if code != 0 {
+		t.Fatalf("run() returned %d: %s", code, out)
+	}
+	var rep struct {
+		When     string                 `json:"when"`
+		Commands map[string][]CmdResult `json:"commands"`
+	}
+	if err := json.Unmarshal(out, &rep); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, out)
+	}
+	if got := rep.Commands["test"]; len(got) != 1 || !reflect.DeepEqual(got[0].Cmd, []string{"true"}) || !got[0].Found {
+		t.Fatalf("commands[test] = %+v, want the command clean would run", got)
+	}
+	if !regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)$`).MatchString(rep.When) {
+		t.Fatalf("when = %q, want RFC 3339 with offset in whole seconds", rep.When)
+	}
+}
+
+func TestPopulateCommandsFoundMatchesWhatCleanCanRun(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "nvm.sh")
+	if err := os.WriteFile(marker, []byte("# shell function only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	rep := &Report{Commands: map[string][]CmdResult{}}
+	populateCommands([]Target{{
+		Name:  "node-versions",
+		Tools: []Tool{{Name: "bilgefakenvm", CheckPath: marker, InstallCmd: "n/a"}},
+		Cmds:  [][]string{{"bilgefakenvm", "cache", "clear"}},
+	}}, rep)
+	got := rep.Commands["node-versions"]
+	if len(got) != 1 || got[0].Found || got[0].Error == "" {
+		t.Fatalf("commands = %+v; want found=false because the command is not executable on PATH", got)
+	}
+	if res := runCmd(got[0].Cmd); res.Found {
+		t.Fatalf("fixture: runCmd found %v", got[0].Cmd)
 	}
 }

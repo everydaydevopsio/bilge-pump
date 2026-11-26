@@ -672,6 +672,10 @@ func pathWithScanAlias(path, resolvedRoot, filterRoot string) string {
 	return filepath.Join(filterRoot, rel)
 }
 
+// reportTime is the `when` of a JSON report: local time with its UTC offset,
+// in whole seconds. Every Bilge binary formats `when` this way.
+func reportTime() time.Time { return time.Now().Truncate(time.Second) }
+
 func checkVersionFlag() bool {
 	for _, arg := range os.Args[1:] {
 		if arg == "-version" || arg == "--version" {
@@ -975,7 +979,7 @@ func main() {
 		Arch:     runtime.GOARCH,
 		DryRun:   !*flagClean,
 		Version:  version,
-		When:     time.Now(),
+		When:     reportTime(),
 		ScanPath: scanPath,
 		MaxDepth: maxDepth,
 		Findings: []Finding{},
