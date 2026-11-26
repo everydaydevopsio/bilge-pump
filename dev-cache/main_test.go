@@ -2043,3 +2043,39 @@ func TestDryRunAppliesGitSafetyCheck(t *testing.T) {
 		t.Errorf("--unsafe-clean dry run total = %d, skipped = %d; want 140 and 0", unsafe.Total, unsafe.SkippedBytes)
 	}
 }
+
+func TestMarkUnsafeFindingsChecksIncompleteInspections(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs an unreadable directory")
+	}
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	cache := filepath.Join(repo, "node_modules")
+	locked := filepath.Join(cache, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "readable"), make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(locked, 0o755) }()
+
+	f, _ := inspectPath(cache)
+	if f.Err == "" || f.SizeBytes == 0 {
+		t.Fatalf("fixture: want a partial inspection with bytes, got %+v", f)
+	}
+	f.Pattern = "node_modules"
+	findings := []Finding{f}
+	markUnsafeFindings(findings)
+	if findings[0].SkipReason == "" {
+		t.Fatalf("incomplete inspection was not safety-checked: %+v", findings[0])
+	}
+}

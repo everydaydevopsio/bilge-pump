@@ -1154,7 +1154,9 @@ func main() {
 // each path right before deleting it.
 func markUnsafeFindings(findings []Finding) {
 	for i := range findings {
-		if !isCacheDirectory(findings[i]) || findings[i].Err != "" {
+		// Incomplete inspections are checked too: clean's safety walk refuses
+		// an unreadable tree, so its partial bytes must not count as cleanable.
+		if !isCacheDirectory(findings[i]) {
 			continue
 		}
 		if allowed, reason := safeCachePath(findings[i]); !allowed {
