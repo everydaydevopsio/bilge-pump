@@ -201,7 +201,7 @@ The `--list-targets` flag shows all available targets:
 
 #### JSON Mode Behavior
 - When `--json` is provided, the app outputs the initial scan results (including totals and warnings) and exits. Cleanup is not performed even if `--clean` is also set.
-- The JSON `commands` field lists, per target, the exact commands clean would run, with whether each is available (`found`) or why it would not run (`error`).
+- The JSON `commands` field lists, per target, the exact commands clean would run, with whether clean can execute it (`found`, the same `PATH` lookup clean uses) or why it would not run (`error`).
 
 ### Out of Scope
 - Windows/Linux paths (future)

@@ -994,3 +994,24 @@ func TestRunJSONIncludesPlannedCommandsAndOffsetTime(t *testing.T) {
 		t.Fatalf("when = %q, want RFC 3339 with offset in whole seconds", rep.When)
 	}
 }
+
+func TestPopulateCommandsFoundMatchesWhatCleanCanRun(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "nvm.sh")
+	if err := os.WriteFile(marker, []byte("# shell function only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	rep := &Report{Commands: map[string][]CmdResult{}}
+	populateCommands([]Target{{
+		Name:  "node-versions",
+		Tools: []Tool{{Name: "bilgefakenvm", CheckPath: marker, InstallCmd: "n/a"}},
+		Cmds:  [][]string{{"bilgefakenvm", "cache", "clear"}},
+	}}, rep)
+	got := rep.Commands["node-versions"]
+	if len(got) != 1 || got[0].Found || got[0].Error == "" {
+		t.Fatalf("commands = %+v; want found=false because the command is not executable on PATH", got)
+	}
+	if res := runCmd(got[0].Cmd); res.Found {
+		t.Fatalf("fixture: runCmd found %v", got[0].Cmd)
+	}
+}

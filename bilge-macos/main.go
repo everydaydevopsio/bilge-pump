@@ -807,17 +807,16 @@ func populateCommands(targets []Target, rep *Report) {
 			found := false
 			errorMsg := ""
 
+			// found uses the same PATH lookup as runCmd, so it says whether
+			// clean can execute the command. A tool detected another way (e.g.
+			// nvm via CheckPath, a shell function) is still not executable.
 			if len(c) > 0 {
-				if installed, ok := toolStatus[c[0]]; ok {
-					found = installed
-					if !installed {
+				_, err := exec.LookPath(c[0])
+				found = err == nil
+				if !found {
+					errorMsg = "not found"
+					if installed, ok := toolStatus[c[0]]; ok && !installed {
 						errorMsg = fmt.Sprintf("tool '%s' not installed", c[0])
-					}
-				} else {
-					_, err := exec.LookPath(c[0])
-					found = err == nil
-					if !found {
-						errorMsg = "not found"
 					}
 				}
 			}
