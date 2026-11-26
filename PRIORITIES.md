@@ -6,7 +6,7 @@ Prioritized from the current code review and open GitHub issues. Do these in ord
 
 - [x] Update repository references in release tooling: GoReleaser, the installer, Codecov, and the generated cask now use `everydaydevopsio/bilge-pump` and `everydaydevopsio/homebrew-bilge-pump`.
 - [ ] Make `dev-cache --clean` refuse a match containing Git-tracked files by default. Cover checked-in `vendor/`, `bin/`, and similar generic directory names. Print the exact skipped path and reason. See [issue #80](https://github.com/everydaydevopsio/bilge-pump/issues/80).
-- [ ] Remove `sdkmanager --update` from cleanup actions. Change the Android target to report accurate cache usage and only offer safe, explicit removal actions. See [issue #80](https://github.com/everydaydevopsio/bilge-pump/issues/80).
+- [x] Remove `sdkmanager --update` from cleanup actions. Change the Android target to report accurate cache usage and only offer safe, explicit removal actions. See [issue #80](https://github.com/everydaydevopsio/bilge-pump/issues/80).
 - [ ] Do not prune Docker volumes by default. Require a separate explicit opt-in for named/unused volume removal, and preview the affected data before execution. See [issues #55 and #80](https://github.com/everydaydevopsio/bilge-pump/issues/55).
 - [ ] Replace the macOS cleaner's blanket `y` input with per-action confirmation or documented non-interactive flags. Do not let `--clean` silently approve every command prompt.
 

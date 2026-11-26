@@ -135,6 +135,9 @@ type Report struct {
 	Findings map[string][]Finding   `json:"findings"`
 	Commands map[string][]CmdResult `json:"commands"`
 	Warnings []string               `json:"warnings"`
+	// Hints are manual commands for informational targets, e.g. how to delete
+	// an Android emulator image that Bilge measures but never removes.
+	Hints map[string][]string `json:"hints,omitempty"`
 }
 
 // ----- Utilities -----
@@ -561,7 +564,7 @@ func defaultConfig() Config {
 			{Name: "chrome", Enabled: true, Notes: "Chrome cache (informational only)", Paths: []string{"~/Library/Caches/Google/Chrome", "~/Library/Application Support/Google/Chrome/*/Cache"}, Cmds: [][]string{}},
 			{Name: "macos", Enabled: false, Notes: "macOS system caches (advanced users only)", Paths: []string{"~/Library/Caches", "~/Library/Containers/com.apple.QuickLook.thumbnailcache"}, Cmds: [][]string{{"qlmanage", "-r", "cache"}}},
 			{Name: "flutter", Enabled: true, Notes: "Flutter and Dart caches (pub, SDK, and analysis artifacts)", Paths: []string{"~/.pub-cache", "~/.dartServer", "~/Library/Developer/flutter", "~/Library/Caches/flutter"}, Cmds: [][]string{{"flutter", "pub", "cache", "clean", "--force"}}, Tools: []Tool{{Name: "flutter", InstallCmd: "Install Flutter manually", InstallNotes: "For installation instructions, visit: https://docs.flutter.dev/install/manual"}}},
-			{Name: "android", Enabled: true, Notes: "Android SDK and emulator caches", Paths: []string{"~/.android/cache", "~/.android/avd", "~/Library/Android/sdk"}, Cmds: [][]string{{"sdkmanager", "--update"}}},
+			{Name: "android", Enabled: true, Notes: "Android emulator images and SDK system images (informational; see hints for removal commands)", Paths: []string{"~/.android/cache", "~/.android/avd/*.avd", "~/Library/Android/sdk/system-images/*/*/*"}, Cmds: [][]string{}},
 			{Name: "android-studio", Enabled: true, Notes: "Android Studio IDE caches, logs, and indexes", Paths: []string{"~/Library/Caches/Google/AndroidStudio*", "~/Library/Logs/Google/AndroidStudio*", "~/Library/Application Support/Google/AndroidStudio*/system/caches", "~/Library/Application Support/Google/AndroidStudio*/system/index"}, Cmds: [][]string{}},
 			{Name: "terraform", Enabled: true, Notes: "Terraform plugin cache", Paths: []string{"~/.terraform.d/plugin-cache/"}, Cmds: [][]string{}, Tools: []Tool{{Name: "terraform", InstallCmd: "brew install terraform"}}},
 			{Name: "packer", Enabled: true, Notes: "Packer plugins directory", Paths: []string{"~/.packer.d/plugins"}, Cmds: [][]string{}, Tools: []Tool{{Name: "packer", InstallCmd: "brew install packer"}}},
@@ -827,6 +830,56 @@ func populateCommands(targets []Target, rep *Report) {
 	}
 }
 
+// targetHints returns manual removal commands for what an informational target
+// measured. Android AVDs and system images are user data Bilge never deletes.
+// A measured path may be an AVD or system image itself (current defaults) or
+// a parent such as ~/.android/avd or the SDK root (older configs); parents are
+// searched for the items inside them.
+func targetHints(target string, findings []Finding) []string {
+	if target != "android" {
+		return nil
+	}
+	var hints []string
+	for _, f := range findings {
+		if f.Err != "" {
+			continue
+		}
+		if hint, ok := androidHint(f); ok {
+			hints = append(hints, hint)
+			continue
+		}
+		for _, pattern := range []string{filepath.Join(f.Path, "*.avd"), filepath.Join(f.Path, "system-images", "*", "*", "*")} {
+			matches, _ := filepath.Glob(pattern)
+			for _, m := range matches {
+				item, err := inspectPath(m)
+				if err != nil {
+					continue
+				}
+				if hint, ok := androidHint(item); ok {
+					hints = append(hints, hint)
+				}
+			}
+		}
+	}
+	return hints
+}
+
+// androidHint describes how to remove one AVD or SDK system image.
+func androidHint(f Finding) (string, bool) {
+	size := human(f.SizeBytes)
+	if name, ok := strings.CutSuffix(filepath.Base(f.Path), ".avd"); ok {
+		return fmt.Sprintf("AVD %s (%s): avdmanager delete avd -n %s", name, size, name), true
+	}
+	parts := strings.Split(filepath.ToSlash(f.Path), "/")
+	for i, part := range parts {
+		if part == "system-images" && len(parts) == i+4 {
+			pkg := "system-images;" + strings.Join(parts[i+1:], ";")
+			return fmt.Sprintf("system image %s (%s): sdkmanager --uninstall %q", strings.Join(parts[i+1:], "/"), size, pkg), true
+		}
+	}
+	return "", false
+}
+
 // runFirstScan scans all targets and populates rep.Findings. Returns beforeTotals map.
 func runFirstScan(targets []Target, rep *Report) map[string]uint64 {
 	beforeTotals := make(map[string]uint64)
@@ -863,6 +916,12 @@ func runFirstScan(targets []Target, rep *Report) map[string]uint64 {
 				rep.Findings[t.Name] = append(rep.Findings[t.Name], f)
 				sum += f.SizeBytes
 			}
+		}
+		if hints := targetHints(t.Name, rep.Findings[t.Name]); len(hints) > 0 {
+			if rep.Hints == nil {
+				rep.Hints = map[string][]string{}
+			}
+			rep.Hints[t.Name] = hints
 		}
 		beforeTotals[t.Name] = uint64(sum)
 		_, _ = fmt.Fprintf(progress, " done (%s)\n", human(sum))
@@ -1345,6 +1404,20 @@ func run() int {
 		if totalFreed > 0 {
 			fmt.Printf("Total space freed: %s\n", human(totalFreed))
 		}
+	}
+	if len(rep.Hints) > 0 {
+		names := make([]string, 0, len(rep.Hints))
+		for name := range rep.Hints {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Println("Manual cleanup (Bilge does not remove these):")
+		for _, name := range names {
+			for _, h := range rep.Hints[name] {
+				fmt.Printf(" - [%s] %s\n", name, h)
+			}
+		}
+		fmt.Println()
 	}
 	if len(rep.Warnings) > 0 {
 		fmt.Println("Warnings:")

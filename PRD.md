@@ -133,7 +133,7 @@ targets:
 - **chrome** - Chrome caches (informational only, no CLI)
 - **macos** - macOS system caches (advanced users only, disabled by default)
 - **flutter** - Flutter and Dart caches
-- **android** - Android SDK and emulator caches
+- **android** - informational: measures `~/.android/cache`, each emulator AVD (`~/.android/avd/*.avd`) and each SDK system image (`sdk/system-images/<api>/<tag>/<abi>`), not SDK platforms or build-tools. It runs no command (`sdkmanager --update` is gone from the defaults and dropped from older configs at load). The report's `hints` (JSON) and a "Manual cleanup" section (text) list each item with its size and removal command (`avdmanager delete avd -n <name>`, `sdkmanager --uninstall "system-images;…"`); older configs that measure `~/.android/avd` or the SDK root get the same hints.
 - **android-studio** - Android Studio IDE caches
 - **terraform** - Terraform plugin cache
 - **packer** - Packer plugins directory
