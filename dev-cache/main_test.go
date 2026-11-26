@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -1951,4 +1952,130 @@ func TestScanDirectoryWalkError(t *testing.T) {
 	findings := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{})
 	// Should not panic; may or may not find things depending on walk behavior
 	_ = findings
+}
+
+func TestDryRunAppliesGitSafetyCheck(t *testing.T) {
+	repo := t.TempDir()
+	app := filepath.Join(repo, "app")
+	write := func(path string, size int) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(app, "package.json"), 2)
+	write(filepath.Join(app, "bin", "tool"), 100)
+	write(filepath.Join(app, "node_modules", "m"), 40)
+	for _, args := range [][]string{{"init", "--quiet"}, {"add", "app/bin/tool"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	cfg := Config{
+		Version:   1,
+		Options:   Options{DefaultScanPath: repo, MaxDepth: 2, DetectLanguage: true},
+		Languages: []Language{{Name: "node", Enabled: true, Patterns: []string{"node_modules", "bin"}, Signatures: []string{"package.json"}}},
+	}
+	configBytes, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "dev-cache.yaml")
+	if err := os.WriteFile(configPath, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "dev-cache")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build dev-cache: %v: %s", err, out)
+	}
+	_, wantReason := safeCachePath(Finding{Path: filepath.Join(app, "bin")})
+	if !strings.Contains(wantReason, "Git-tracked") {
+		t.Fatalf("fixture: safeCachePath reason = %q, want Git-tracked", wantReason)
+	}
+
+	scan := func(extra ...string) Report {
+		t.Helper()
+		out, err := exec.Command(binary, append([]string{"--config", configPath, "--json"}, extra...)...).Output()
+		if err != nil {
+			t.Fatalf("dev-cache --json: %v", err)
+		}
+		var rep Report
+		if err := json.Unmarshal(out, &rep); err != nil {
+			t.Fatalf("invalid JSON: %v: %s", err, out)
+		}
+		return rep
+	}
+
+	rep := scan()
+	reasons := map[string]string{}
+	for _, f := range rep.Findings {
+		reasons[filepath.Base(f.Path)] = f.SkipReason
+	}
+	if reasons["bin"] != wantReason {
+		t.Errorf("bin skip_reason = %q, want %q", reasons["bin"], wantReason)
+	}
+	if reasons["node_modules"] != "" {
+		t.Errorf("node_modules skip_reason = %q, want none", reasons["node_modules"])
+	}
+	if rep.Total != 40 || rep.SkippedBytes != 100 {
+		t.Errorf("total_bytes = %d, skipped_bytes = %d; want 40 and 100", rep.Total, rep.SkippedBytes)
+	}
+
+	text, err := exec.Command(binary, "--config", configPath).Output()
+	if err != nil {
+		t.Fatalf("dev-cache table: %v", err)
+	}
+	if !bytes.Contains(text, []byte("SKIP "+filepath.Join(app, "bin"))) || !bytes.Contains(text, []byte(wantReason)) {
+		t.Errorf("table output does not show the skip and reason:\n%s", text)
+	}
+
+	unsafe := scan("--unsafe-clean")
+	if unsafe.Total != 140 || unsafe.SkippedBytes != 0 {
+		t.Errorf("--unsafe-clean dry run total = %d, skipped = %d; want 140 and 0", unsafe.Total, unsafe.SkippedBytes)
+	}
+}
+
+func TestMarkUnsafeFindingsChecksIncompleteInspections(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs an unreadable directory")
+	}
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	cache := filepath.Join(repo, "node_modules")
+	locked := filepath.Join(cache, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "readable"), make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(locked, 0o755) }()
+
+	f, _ := inspectPath(cache)
+	if f.Err == "" || f.SizeBytes == 0 {
+		t.Fatalf("fixture: want a partial inspection with bytes, got %+v", f)
+	}
+	f.Pattern = "node_modules"
+	findings := []Finding{f}
+	markUnsafeFindings(findings)
+	if findings[0].SkipReason == "" {
+		t.Fatalf("incomplete inspection was not safety-checked: %+v", findings[0])
+	}
 }

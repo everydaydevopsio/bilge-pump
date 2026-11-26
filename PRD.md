@@ -335,6 +335,7 @@ All paths use `filepath.Join()` for cross-platform compatibility. Home directory
 - **Shows what will be deleted**: The tool displays all findings before asking for confirmation
 - **Error handling**: Deletion errors are logged and reported, but don't stop the process
 - **Git-aware cleanup**: Cleanup skips caches containing tracked files, nested Git repositories, or paths not ignored by Git. `--unsafe-clean` is the explicit override.
+- **Safety check in dry run**: The scan applies the same Git check, so the dry run matches what clean would do. Refused caches carry `skip_reason` (the reason clean prints) in JSON, are listed as `SKIP` under the table, and are excluded from `total_bytes`; their size is in `skipped_bytes`. Clean still rechecks each path right before deleting it. With `--unsafe-clean`, nothing is marked skipped.
 
 ### Future Enhancements
 - Backup before deletion
