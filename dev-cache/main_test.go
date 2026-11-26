@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1951,4 +1953,124 @@ func TestScanDirectoryWalkError(t *testing.T) {
 	findings := scanDirectory(root, 2, patterns, patternToLang, false, nil, nil, nil, ScanFilters{})
 	// Should not panic; may or may not find things depending on walk behavior
 	_ = findings
+}
+
+func TestDiscoverGitRepos(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{
+		"org/repo/.git",
+		"org/repo/node_modules/dep/.git", // inside a cache: not a project
+		"a/b/c/deep/.git",                // .git at depth 4: found
+		"a/b/c/d/too-deep/.git",          // .git at depth 5: not found
+		"top/.git",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A worktree or submodule has a .git file.
+	if err := os.MkdirAll(filepath.Join(root, "org", "wt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "org", "wt", ".git"), []byte("gitdir: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := discoverGitRepos(root, 4, []string{"node_modules"})
+	var rel []string
+	for _, p := range got {
+		r, _ := filepath.Rel(root, p)
+		rel = append(rel, filepath.ToSlash(r))
+	}
+	want := []string{"a/b/c/deep", "org/repo", "org/wt", "top"}
+	if !reflect.DeepEqual(rel, want) {
+		t.Fatalf("repos = %v, want %v", rel, want)
+	}
+}
+
+func TestDefaultScanFindsNestedRepos(t *testing.T) {
+	root := t.TempDir()
+	write := func(parts ...string) {
+		t.Helper()
+		p := filepath.Join(append([]string{root}, parts...)...)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("org", "repo", ".git", "HEAD")
+	write("org", "repo", "package.json")
+	write("org", "repo", "node_modules", "dep", "index.js")
+	write("org", "mono", ".git", "HEAD")
+	write("org", "mono", "apps", "web", "package.json")
+	write("org", "mono", "apps", "web", "node_modules", "dep", "index.js")
+	write("loose", "package.json")
+	write("loose", "node_modules", "dep", "index.js")
+
+	cfg := defaultConfig()
+	scan := func(depth int, discover bool) []string {
+		t.Helper()
+		scanFn := func(dir string, d int) []Finding {
+			return scanDirectory(dir, d, []string{"node_modules"}, map[string]string{"node_modules": "node"}, false, nil, nil, nil, ScanFilters{})
+		}
+		var out []string
+		for _, f := range scanProjects(root, depth, discover, []string{"node_modules"}, scanFn) {
+			if f.Pattern != "" {
+				r, _ := filepath.Rel(root, f.Path)
+				out = append(out, filepath.ToSlash(r))
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	if got, want := scan(cfg.Options.MaxDepth, true), []string{"loose/node_modules", "org/mono/apps/web/node_modules", "org/repo/node_modules"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("discovery scan = %v, want %v", got, want)
+	}
+	if got, want := scan(1, false), []string{"loose/node_modules"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit --depth 1 scan = %v, want %v", got, want)
+	}
+}
+
+func TestScanDoesNotDescendIntoUnselectedCacheDirs(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		"app/Makefile",
+		"app/package.json",
+		"app/node_modules/.pnpm/lodash@4/node_modules/lodash/index.js",
+		"app/node_modules/.pnpm/react@18/node_modules/react/index.js",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := defaultConfig()
+	var patterns []string
+	patternToLang := map[string]string{}
+	sigs := map[string][]string{}
+	prios := map[string]int{}
+	langToPatterns := map[string][]string{}
+	for _, l := range cfg.Languages {
+		patterns = append(patterns, l.Patterns...)
+		for _, p := range l.Patterns {
+			patternToLang[p] = l.Name
+		}
+		sigs[l.Name] = l.Signatures
+		prios[l.Name] = l.Priority
+		langToPatterns[l.Name] = l.Patterns
+	}
+	var caches []string
+	for _, f := range scanDirectory(root, 4, patterns, patternToLang, true, sigs, prios, langToPatterns, ScanFilters{}) {
+		if f.Pattern != "" {
+			r, _ := filepath.Rel(root, f.Path)
+			caches = append(caches, filepath.ToSlash(r))
+		}
+	}
+	if !reflect.DeepEqual(caches, []string{"app/node_modules"}) {
+		t.Fatalf("caches = %v; want only app/node_modules (a Node repo with a Makefile)", caches)
+	}
 }

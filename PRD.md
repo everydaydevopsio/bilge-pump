@@ -235,7 +235,7 @@ A cross-platform Go CLI tool that scans source code directories to find and opti
 - `--force` forces overwrite of existing config (use with --init)
 - `--config PATH` specifies path to YAML config (default: `~/.config/dev-cache/config.yaml`)
 - `--scan PATH` directory to scan (overrides config default)
-- `--depth N` max scan depth (overrides config default, 0 = use config)
+- `--depth N` max scan depth (overrides config default, 0 = use config). Without `--depth`, dev-cache also discovers Git repositories (a `.git` directory or file) up to 4 levels below the scan path, not descending into `.git` or cache-named directories, and scans each from its own root at least 3 levels deep, so `~/src/<org>/<repo>` layouts and monorepo caches (`apps/web/node_modules`) are found with the default config. Findings are de-duplicated by path. Passing `--depth` turns discovery off and scans by depth only.
 - `--languages LIST` comma-separated list of languages to scan (e.g., `node,python,go`)
 - `--unsafe-clean` allow cleanup of cache paths that Git does not mark ignored (unsafe override)
 - `--exclude PATHS` comma-separated project paths to exclude from scanning and cleanup
@@ -295,6 +295,8 @@ languages:
 #### Pattern Matching
 - **Exact match**: `node_modules` matches only `node_modules`
 - **Wildcard prefix**: `cmake-build-*` matches `cmake-build-debug`, `cmake-build-release`, etc.
+- **No descent into dependency trees**: a directory named like any cache pattern is never walked into, even when it is not selected for the detected language (e.g. `node_modules` in a repo detected as C++ from its `Makefile`), so nested stores such as `node_modules/.pnpm/*/node_modules` are not reported.
+- **Priorities**: `cpp` has the lowest default priority (20) because a `Makefile` is a weak signal that many Node, Go and Python repositories also have.
 
 #### Path and Age Filters
 - `excludePaths` and `includeOnly` accept exact paths, descendant paths, and valid path globs; relative patterns resolve from the process working directory, whose characters are treated literally. Malformed globs fail before scanning. On Windows, path and glob comparisons are case-insensitive. Filters apply throughout the scan tree so nested projects can be selected.
