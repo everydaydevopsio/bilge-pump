@@ -295,7 +295,7 @@ languages:
 #### Pattern Matching
 - **Exact match**: `node_modules` matches only `node_modules`
 - **Wildcard prefix**: `cmake-build-*` matches `cmake-build-debug`, `cmake-build-release`, etc.
-- **Language labels**: with language detection on, a cache takes the language of the nearest enclosing directory with a signature file (so `~/src/<org>/<repo>/node_modules` is labelled from `<repo>`), and only that language's patterns are matched there; the finding's project root is that directory. With no signature the label is `unknown`, never a guess from the pattern name. With detection off, a pattern owned by one language keeps that language and a shared pattern (`node_modules`, `build`, `target`) is `unknown`.
+- **Language labels**: with language detection on, a cache takes the language of the nearest enclosing directory with a signature file, up to and including the scan root (so `~/src/<org>/<repo>/node_modules` is labelled from `<repo>`, and a Python service inside a Node monorepo is Python), and only that language's patterns are matched there; the finding's project root is that directory. With no signature the label is `unknown`, never a guess from the pattern name. With detection off, a pattern owned by one language keeps that language and a shared pattern (`node_modules`, `build`, `target`) is `unknown`.
 
 #### Path and Age Filters
 - `excludePaths` and `includeOnly` accept exact paths, descendant paths, and valid path globs; relative patterns resolve from the process working directory, whose characters are treated literally. Malformed globs fail before scanning. On Windows, path and glob comparisons are case-insensitive. Filters apply throughout the scan tree so nested projects can be selected.

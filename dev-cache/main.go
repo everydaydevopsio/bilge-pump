@@ -1343,14 +1343,15 @@ func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patt
 	// Track excluded directories (will be reported with empty language)
 	excludedDirs := make(map[string]bool)
 	// nearestLanguage returns the language of the closest directory at or above
-	// dir (and below root) with a signature, so caches in repos nested below
-	// the first level (root/<org>/<repo>/node_modules) get their repo's language.
+	// dir, up to and including the scan root, with a signature. Caches take
+	// their nearest project's language, so root/<org>/<repo>/node_modules gets
+	// the repo's language and a Python service inside a Node monorepo is Python.
 	rootPrefix := root
 	if !strings.HasSuffix(rootPrefix, string(filepath.Separator)) {
 		rootPrefix += string(filepath.Separator)
 	}
 	nearestLanguage := func(dir string) (string, string) {
-		for p := dir; p != root && strings.HasPrefix(p, rootPrefix); p = filepath.Dir(p) {
+		for p := dir; p == root || strings.HasPrefix(p, rootPrefix); p = filepath.Dir(p) {
 			lang, ok := langCache[p]
 			if !ok {
 				lang = detectLanguage(p, langSignatures, langPriorities)
@@ -1358,6 +1359,9 @@ func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patt
 			}
 			if lang != "" {
 				return lang, p
+			}
+			if p == root {
+				break
 			}
 		}
 		return "", ""
@@ -1568,12 +1572,12 @@ func scanDirectoryWithInspect(root string, maxDepth int, patterns []string, patt
 				}
 			}
 
-			signatureRoot := ""
-			if detectedLang == "" && !isExcluded && !excludedDirs[projectRoot] {
-				detectedLang, signatureRoot = nearestLanguage(filepath.Dir(cleanPath))
-			}
-			if signatureRoot != "" {
-				projectRoot = signatureRoot
+			// The nearest enclosing signature decides this directory's language
+			// and project, overriding a match at a more distant ancestor.
+			if !isExcluded && !excludedDirs[projectRoot] {
+				if lang, signatureRoot := nearestLanguage(filepath.Dir(cleanPath)); lang != "" {
+					detectedLang, projectRoot = lang, signatureRoot
+				}
 			}
 
 			// If language detected, use only patterns for that language

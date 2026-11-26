@@ -2054,3 +2054,55 @@ func TestBuildLanguageMapsSharedPatternsAreUnknown(t *testing.T) {
 		}
 	}
 }
+
+func TestLanguageLabelsNearestSignatureWins(t *testing.T) {
+	mk := func(root string, parts ...string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(append([]string{root}, parts...)...), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch := func(root string, parts ...string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(append([]string{root}, parts...)...), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	patterns, patternToLang, sigs, prios, langToPatterns := buildLanguageMaps(defaultConfig().Languages)
+	find := func(root string, depth int) map[string]Finding {
+		got := map[string]Finding{}
+		for _, f := range scanDirectory(root, depth, patterns, patternToLang, true, sigs, prios, langToPatterns, ScanFilters{}) {
+			if f.Pattern != "" {
+				rel, _ := filepath.Rel(root, f.Path)
+				got[filepath.ToSlash(rel)] = f
+			}
+		}
+		return got
+	}
+
+	t.Run("nested project inside another language's project", func(t *testing.T) {
+		root := t.TempDir()
+		mk(root, "monorepo", "node_modules", "x")
+		touch(root, "monorepo", "package.json")
+		mk(root, "monorepo", "service", ".venv", "lib")
+		touch(root, "monorepo", "service", "pyproject.toml")
+		got := find(root, 3)
+		venv, ok := got["monorepo/service/.venv"]
+		if !ok || venv.Language != "python" || venv.ProjectRoot != filepath.Join(root, "monorepo", "service") {
+			t.Fatalf("service/.venv = %+v (found %v); want python with project root service (all %v)", venv, ok, got)
+		}
+		if got["monorepo/node_modules"].Language != "node" {
+			t.Fatalf("monorepo/node_modules = %+v", got["monorepo/node_modules"])
+		}
+	})
+	t.Run("signature at the scan root", func(t *testing.T) {
+		root := t.TempDir()
+		touch(root, "pyproject.toml")
+		mk(root, "src", "__pycache__")
+		touch(root, "src", "__pycache__", "m.pyc")
+		got := find(root, 2)
+		if f := got["src/__pycache__"]; f.Language != "python" || f.ProjectRoot != root {
+			t.Fatalf("src/__pycache__ = %+v; want python with project root at the scan root (all %v)", f, got)
+		}
+	})
+}
