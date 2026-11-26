@@ -111,7 +111,8 @@ targets:
 
 #### Supported Targets
 - **docker** - Docker caches and images
-- **brew** - Homebrew packages and caches
+- **brew** - Homebrew caches and old package versions (`brew cleanup -s`). Configs that still list `brew autoremove` under `brew` have it dropped at load.
+- **brew-autoremove** - opt-in, disabled by default: `brew autoremove` uninstalls formulae no longer needed as dependencies, so it is not cache cleanup. Runs only when enabled in config or named with `--targets brew-autoremove` (available even in configs written before it existed).
 - **npm** - npm cache
 - **yarn** - Global Yarn cache
 - **pnpm** - pnpm store and cache
