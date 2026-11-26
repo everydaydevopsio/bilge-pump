@@ -531,13 +531,21 @@ func expandGlobs(pattern string) ([]string, error) {
 
 // ----- Config IO -----
 
+// brewAutoremoveTarget is opt-in: `brew autoremove` uninstalls formulae that
+// were installed as dependencies, so it is not cache cleanup. It runs only
+// when enabled in config or named explicitly with --targets.
+func brewAutoremoveTarget() Target {
+	return Target{Name: "brew-autoremove", Enabled: false, Notes: "Uninstalls Homebrew formulae no longer needed as dependencies (brew autoremove); opt-in, not a cache", Cmds: [][]string{{"brew", "autoremove"}}, Tools: []Tool{{Name: "brew"}}}
+}
+
 func defaultConfig() Config {
 	return Config{
 		Version: 1,
 		Options: Options{DockerPruneByDefault: false},
 		Targets: []Target{
 			{Name: "docker", Enabled: true, Notes: "Docker caches and images; named volumes are preserved", Paths: []string{"~/Library/Caches/docker", "~/Library/Caches/buildx", "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"}, Cmds: [][]string{{"docker", "builder", "prune", "-af"}, {"docker", "system", "prune", "-af"}}, Tools: []Tool{{Name: "docker", InstallCmd: "brew install --cask docker"}}},
-			{Name: "brew", Enabled: true, Notes: "Homebrew cleanup (removes old packages and caches)", Paths: []string{"~/Library/Caches/Homebrew", "$(brew --cache)"}, Cmds: [][]string{{"brew", "cleanup", "-s"}, {"brew", "autoremove"}}, Tools: []Tool{{Name: "brew", InstallCmd: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""}}},
+			{Name: "brew", Enabled: true, Notes: "Homebrew cleanup (removes old package versions and caches)", Paths: []string{"~/Library/Caches/Homebrew", "$(brew --cache)"}, Cmds: [][]string{{"brew", "cleanup", "-s"}}, Tools: []Tool{{Name: "brew", InstallCmd: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""}}},
+			brewAutoremoveTarget(),
 			{Name: "npm", Enabled: true, Notes: "npm cache", Paths: []string{"~/.npm"}, Cmds: [][]string{{"npm", "cache", "clean", "--force"}}, Tools: []Tool{{Name: "npm", InstallCmd: "brew install node"}}},
 			{Name: "yarn", Enabled: true, Notes: "Global Yarn cache", Paths: []string{"~/Library/Caches/Yarn", "~/.yarn/cache"}, Cmds: [][]string{{"yarn", "cache", "clean"}}, Tools: []Tool{{Name: "yarn", InstallCmd: "brew install yarn"}}},
 			{Name: "pnpm", Enabled: true, Notes: "pnpm store and cache", Paths: []string{"~/.pnpm-store", "~/Library/Caches/pnpm"}, Cmds: [][]string{{"pnpm", "store", "prune"}}, Tools: []Tool{{Name: "pnpm", InstallCmd: "brew install pnpm"}}},
@@ -649,11 +657,25 @@ func loadConfigWithDefaults(path string, allowMissing bool) (*Config, error) {
 			if cfg.Targets[i].Name == "docker" && !cfg.Options.DockerPruneByDefault && !*flagDockerPrune && containsArg(cmd, "--volumes") {
 				continue
 			}
+			// brew autoremove uninstalls packages; it moved to the opt-in
+			// brew-autoremove target.
+			if cfg.Targets[i].Name == "brew" && len(cmd) == 2 && cmd[0] == "brew" && cmd[1] == "autoremove" {
+				continue
+			}
 			filtered = append(filtered, cmd)
 		}
 		cfg.Targets[i].Cmds = filtered
 	}
 	return &cfg, nil
+}
+
+func findConfigTarget(targets []Target, name string) (Target, bool) {
+	for _, t := range targets {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return Target{}, false
 }
 
 func containsArg(args []string, want string) bool {
@@ -880,13 +902,20 @@ func selectTargets(cfg *Config, targetsFlag string) []Target {
 	}
 	var targets []Target
 	for _, t := range cfg.Targets {
-		if !t.Enabled {
+		named := sel[strings.ToLower(t.Name)]
+		// A disabled target runs only when named explicitly; "all" skips it.
+		if !t.Enabled && !named {
 			continue
 		}
-		if !sel["all"] && !sel[strings.ToLower(t.Name)] {
+		if !sel["all"] && !named {
 			continue
 		}
 		targets = append(targets, t)
+	}
+	// Configs written before brew-autoremove existed lack it; naming it still
+	// selects the built-in opt-in target.
+	if _, inConfig := findConfigTarget(cfg.Targets, "brew-autoremove"); !inConfig && sel["brew-autoremove"] {
+		targets = append(targets, brewAutoremoveTarget())
 	}
 	return targets
 }

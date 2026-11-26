@@ -955,3 +955,58 @@ func TestConfigIO_WriteAndLoad(t *testing.T) {
 		t.Fatalf("nested config not created: %v", err)
 	}
 }
+
+func findTargetForTest(targets []Target, name string) (Target, bool) {
+	for _, t := range targets {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return Target{}, false
+}
+
+func TestBrewAutoremoveIsOptIn(t *testing.T) {
+	cfg := defaultConfig()
+	brew, _ := findTargetForTest(cfg.Targets, "brew")
+	for _, cmd := range brew.Cmds {
+		if containsArg(cmd, "autoremove") {
+			t.Fatalf("brew cache target still runs %v", cmd)
+		}
+	}
+	auto, ok := findTargetForTest(cfg.Targets, "brew-autoremove")
+	if !ok || auto.Enabled || len(auto.Cmds) != 1 || strings.Join(auto.Cmds[0], " ") != "brew autoremove" {
+		t.Fatalf("brew-autoremove = %+v (found %v); want a disabled target running brew autoremove", auto, ok)
+	}
+	if !strings.Contains(strings.ToLower(auto.Notes), "uninstall") {
+		t.Fatalf("brew-autoremove notes should say it uninstalls packages: %q", auto.Notes)
+	}
+
+	if _, ok := findTargetForTest(selectTargets(&cfg, "all"), "brew-autoremove"); ok {
+		t.Fatal("--targets all selected the opt-in brew-autoremove target")
+	}
+	if _, ok := findTargetForTest(selectTargets(&cfg, "brew,brew-autoremove"), "brew-autoremove"); !ok {
+		t.Fatal("naming brew-autoremove explicitly did not select it")
+	}
+}
+
+func TestLoadConfigMovesBrewAutoremoveOutOfStaleConfigs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	stale := "version: 1\noptions: {}\ntargets:\n  - name: brew\n    enabled: true\n    cmds: [[\"brew\", \"cleanup\", \"-s\"], [\"brew\", \"autoremove\"]]\n"
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigWithDefaults(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brew, _ := findTargetForTest(cfg.Targets, "brew")
+	if len(brew.Cmds) != 1 || strings.Join(brew.Cmds[0], " ") != "brew cleanup -s" {
+		t.Fatalf("stale brew cmds = %v; want only brew cleanup -s", brew.Cmds)
+	}
+	if _, ok := findTargetForTest(selectTargets(cfg, "all"), "brew-autoremove"); ok {
+		t.Fatal("--targets all selected brew-autoremove for a stale config")
+	}
+	if _, ok := findTargetForTest(selectTargets(cfg, "brew-autoremove"), "brew-autoremove"); !ok {
+		t.Fatal("naming brew-autoremove did not select the built-in opt-in target for a stale config")
+	}
+}

@@ -115,16 +115,22 @@ targets:
 
   - name: brew
     enabled: true
-    notes: "Homebrew cleanup (removes old packages and caches)"
+    notes: "Homebrew cleanup (removes old package versions and caches)"
     paths:
       - ~/Library/Caches/Homebrew
       - $(brew --cache)
     cmds:
       - [brew, cleanup, -s]
-      - [brew, autoremove]
     tools:
       - name: brew
         installCmd: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+  # Opt-in: uninstalls formulae no longer needed as dependencies.
+  # Enable here, or run once with --targets brew-autoremove.
+  - name: brew-autoremove
+    enabled: false
+    cmds:
+      - [brew, autoremove]
 
   - name: npm
     enabled: true
