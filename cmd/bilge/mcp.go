@@ -312,13 +312,14 @@ func planMCPTask(args mcpTaskArgs, clean bool) ([]string, error) {
 	} else if task == "all" {
 		command = append(command, "scan")
 	}
-	if task == "all" {
+	switch task {
+	case "all":
 		if clean {
 			command = append(command, "--all")
 		}
-	} else if task == "system" {
+	case "system":
 		command = append(command, platformCleaner())
-	} else {
+	default:
 		command = append(command, task)
 	}
 	if clean && (task == "dev-cache" || task == "all") {
