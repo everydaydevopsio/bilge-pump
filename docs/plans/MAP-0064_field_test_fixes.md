@@ -50,12 +50,12 @@ Much of this overlaps existing priorities. Don't open duplicate issues; comment 
 
 | ID | Question | Recommended default | Decision |
 | --- | --- | --- | --- |
-| D1 | Config model: overrides-only merged over built-in defaults, or versioned full config with warnings when a target differs destructively from the default? | Overrides-only, with a one-time migration that rewrites existing full configs to just their differences | |
-| D2 | Docker on a non-local context: refuse, or warn and require a flag? | Refuse unless `--docker-context-remote` is passed | |
-| D3 | `brew autoremove`: drop from default brew target, or keep with a warning? | Move to an opt-in `brew-autoremove` target, disabled by default | |
-| D4 | Exit codes: 0 = all clean, 1 = partial (skips or some targets failed), 2 = fatal? Or keep 3? | 0 success incl. intended safety skips; 1 one or more commands failed; 2 usage/config error | |
-| D5 | Allow a `delete-paths` action (Bilge deletes a directory itself) for caches with no official CLI (Gradle, Xcode DerivedData, Terraform plugin cache, `~/.npm/_npx`)? | Yes, for an explicit allow-list of cache dirs, never user-configurable globs; update `AGENTS.md` principle 2 | |
-| D6 | dev-cache default discovery: raise default depth, or discover repos by finding `.git` dirs? | Discover by `.git` (bounded at depth 4), keep `--depth` as an override | |
+| D1 | Config model: overrides-only merged over built-in defaults, or versioned full config with warnings when a target differs destructively from the default? | Overrides-only, with a one-time migration that rewrites existing full configs to just their differences | Overrides-only + one-time migration (backup to `config.yaml.bak`). Decided 2026-11-26. |
+| D2 | Docker on a non-local context: refuse, or warn and require a flag? | Refuse unless `--docker-context-remote` is passed | Refuse unless `--docker-context-remote`. Decided 2026-11-26. |
+| D3 | `brew autoremove`: drop from default brew target, or keep with a warning? | Move to an opt-in `brew-autoremove` target, disabled by default | Opt-in `brew-autoremove` target, disabled by default. Decided 2026-11-26. |
+| D4 | Exit codes: 0 = all clean, 1 = partial (skips or some targets failed), 2 = fatal? Or keep 3? | 0 success incl. intended safety skips; 1 one or more commands failed; 2 usage/config error | 0 success incl. safety skips / 1 command failed / 2 usage-config error; exit 3 removed. Decided 2026-11-26. |
+| D5 | Allow a `delete-paths` action (Bilge deletes a directory itself) for caches with no official CLI (Gradle, Xcode DerivedData, Terraform plugin cache, `~/.npm/_npx`)? | Yes, for an explicit allow-list of cache dirs, never user-configurable globs; update `AGENTS.md` principle 2 | Yes, fixed allow-list only; update `AGENTS.md` principle 2. Decided 2026-11-26. |
+| D6 | dev-cache default discovery: raise default depth, or discover repos by finding `.git` dirs? | Discover by `.git` (bounded at depth 4), keep `--depth` as an override | Discover by `.git` (depth 4), `--depth` override. Decided 2026-11-26. |
 
 ## Execution Checklist
 
@@ -105,6 +105,7 @@ Much of this overlaps existing priorities. Don't open duplicate issues; comment 
 - Validation after rollback: MCP stdio harness passes; `bilge scan` dry run makes no changes (checksum of a fixture tree before/after).
 
 ## Outcome
-- Result: Not started.
-- Evidence links/commands: —
-- PRD updates: —
+- Result: Phase 1 PRs open, CI green, awaiting review/merge. Phase 2 decisions D1–D6 recorded above.
+- Evidence links/commands: P1-1 #96 (issue #95), P1-2 #98 (#97), P1-3 #99, P1-4 #101 (#100), P1-5 #102, P1-6 #103, P1-7 #104. New issues for Phase 2 findings: F2 #105, F5 #106, F9 #107. Field-test evidence commented on #37, #54, #55, #63, #64, #65, #80.
+- PRD updates: each Phase 1 PR updates its governing PRD section.
+- Notes: Copilot reviewer could not be requested (not enabled on the repo). Pre-existing coverage below the 60% minimum on `main`: git-cleaner 41.7%, bilge-macos 59.8% (raised to 60–63% by #98/#101/#103).
