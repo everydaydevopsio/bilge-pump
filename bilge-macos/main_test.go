@@ -6,9 +6,11 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -964,7 +966,7 @@ func fakePython(t *testing.T, pipVersion string) {
 	dir := t.TempDir()
 	script := "#!/bin/sh\nexit 1\n"
 	if pipVersion != "" {
-		script = "#!/bin/sh\nif [ \"$1 $2 $3\" = \"-m pip --version\" ]; then echo \"pip " + pipVersion + " from /stub/site-packages/pip (python 3.x)\"; exit 0; fi\nexit 1\n"
+		script = "#!/bin/sh\nif [ \"$1 $2 $3 $4\" = \"-I -m pip --version\" ]; then echo \"pip " + pipVersion + " from /stub/site-packages/pip (python 3.x)\"; exit 0; fi\nexit 1\n"
 	}
 	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -977,7 +979,7 @@ func fakePython(t *testing.T, pipVersion string) {
 }
 
 func TestResolveCleanCmdPip(t *testing.T) {
-	purge := []string{"python3", "-m", "pip", "cache", "purge"}
+	purge := []string{"python3", "-I", "-m", "pip", "cache", "purge"}
 	tests := []struct {
 		name       string
 		python     bool
@@ -987,7 +989,8 @@ func TestResolveCleanCmdPip(t *testing.T) {
 		skip       string
 	}{
 		{"legacy pip command uses python3 -m pip", true, "24.0", []string{"pip", "cache", "purge"}, purge, ""},
-		{"python3 -m pip command", true, "20.1", purge, purge, ""},
+		{"python3 -m pip command", true, "20.1", []string{"python3", "-m", "pip", "cache", "purge"}, purge, ""},
+		{"isolated python3 command", true, "20.1", purge, purge, ""},
 		{"pip3 command", true, "23.3.1", []string{"pip3", "cache", "purge"}, purge, ""},
 		{"old pip skipped", true, "19.2.3", []string{"pip", "cache", "purge"}, nil, "older than 20.1"},
 		{"pip 20.0 skipped", true, "20.0.2", purge, nil, "older than 20.1"},
@@ -1024,12 +1027,15 @@ func TestPopulateCommandsShowsPipSkip(t *testing.T) {
 	if len(got) != 1 || got[0].Found || !strings.Contains(got[0].Error, "older than 20.1") {
 		t.Fatalf("python commands = %+v, want skipped old pip", got)
 	}
+	if len(rep.Warnings) != 1 || !strings.Contains(rep.Warnings[0], "[python]") || !strings.Contains(rep.Warnings[0], "older than 20.1") {
+		t.Fatalf("warnings = %q, want the skip reason so the table shows it", rep.Warnings)
+	}
 }
 
 func TestDefaultPythonTargetUsesInterpreterPip(t *testing.T) {
 	for _, target := range defaultConfig().Targets {
 		if target.Name == "python" {
-			want := [][]string{{"python3", "-m", "pip", "cache", "purge"}}
+			want := [][]string{{"python3", "-I", "-m", "pip", "cache", "purge"}}
 			if !reflect.DeepEqual(target.Cmds, want) {
 				t.Fatalf("python cmds = %v, want %v", target.Cmds, want)
 			}
@@ -1037,4 +1043,28 @@ func TestDefaultPythonTargetUsesInterpreterPip(t *testing.T) {
 		}
 	}
 	t.Fatal("no python target")
+}
+
+func TestPipProbeIgnoresModulesInWorkingDirectory(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "executed")
+	planted := "open(" + strconv.Quote(marker) + ", 'w').close()\n"
+	if err := os.WriteFile(filepath.Join(dir, "pip.py"), []byte(planted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(old) }()
+	_, _ = resolveCleanCmd([]string{"pip", "cache", "purge"})
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a pip.py in the working directory was executed by the pip probe")
+	}
 }
